@@ -1,0 +1,369 @@
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ReactFlowProvider } from "@xyflow/react";
+import { ChevronLeft, LoaderCircle } from "lucide-react";
+import { useWorkspace } from "./useWorkspace";
+import { Graph } from "./Graph";
+import type { CameraRequest } from "./camera";
+import { ImageLoaderContext } from "./images";
+import { CanvasMark, Sidebar } from "./Sidebar";
+import { TopBar } from "./TopBar";
+import { ReadingPanel } from "./ReadingPanel";
+import { DocumentPages } from "./DocumentPages";
+import { Composer } from "./Composer";
+import { ContextMeter } from "./ContextMeter";
+import { ProviderDialog } from "./ProviderDialog";
+import { api } from "./api";
+import { ancestorPath, contextTokens, visualParent } from "../shared/graph";
+import { DEFAULT_MODEL, MODELS } from "../shared/models";
+import type { Canvas, Message, ProviderStatus } from "../shared/types";
+
+const SIDEBAR_KEY = "canvas.sidebar";
+const MODEL_KEY = "canvas.model";
+
+function stored(key: string) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+function store(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Preferences are a convenience; the workspace works without them.
+  }
+}
+
+// Images in the conversation the next prompt continues.
+function branchImageCount(canvas: Canvas) {
+  const contextId = canvas.editingId
+    ? (canvas.messages.find((m) => m.id === canvas.editingId)?.parentId ??
+      null)
+    : canvas.draftParentId;
+  try {
+    return ancestorPath(canvas, contextId).reduce(
+      (count, m) => count + (m.images?.length ?? 0),
+      0,
+    );
+  } catch {
+    return 0;
+  }
+}
+
+export default function App() {
+  const workspace = useWorkspace();
+  const { active: canvas } = workspace;
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => stored(SIDEBAR_KEY) === "collapsed" ||
+      (stored(SIDEBAR_KEY) === null && matchMedia("(max-width: 700px)").matches),
+  );
+  const [modelId, setModelId] = useState(
+    () => stored(MODEL_KEY) ?? DEFAULT_MODEL,
+  );
+  const model = MODELS.find((m) => m.id === modelId) ?? MODELS[0];
+  const [camera, setCamera] = useState<CameraRequest>();
+  const [lastRead, setLastRead] = useState<{ canvasId: string; message: Message }>();
+  const [provider, setProvider] = useState<ProviderStatus>({ connected: false, source: null });
+  const [providerOpen, setProviderOpen] = useState(false);
+  const geometry = useRef<Record<string, import("../shared/graph").PlacementRect>>({});
+  const stage = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (workspace.loading) return;
+    const prefs = workspace.preferences;
+    if (prefs[SIDEBAR_KEY]) setSidebarCollapsed(prefs[SIDEBAR_KEY] === "collapsed");
+    if (prefs[MODEL_KEY]) setModelId(prefs[MODEL_KEY]);
+  }, [workspace.loading]);
+  useEffect(() => {
+    store(SIDEBAR_KEY, sidebarCollapsed ? "collapsed" : "open");
+  }, [sidebarCollapsed]);
+  useEffect(() => {
+    store(MODEL_KEY, modelId);
+  }, [modelId]);
+  // Selecting a bubble opens the composer for a follow-up from it.
+  useEffect(() => {
+    if (canvas?.selectedId) composer.current?.focus({ preventScroll: true });
+  }, [canvas?.selectedId, canvas?.editingId]);
+  useEffect(() => {
+    if (!canvas) return;
+    const listener = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || workspace.pageSelection) return;
+      if (canvas.editingId) workspace.cancelEdit(canvas.id);
+      else {
+        stage.current?.dispatchEvent(new Event("canvas-clear-selection"));
+        workspace.deselect(canvas.id);
+      }
+    };
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, [canvas?.id, canvas?.selectedId, canvas?.editingId, workspace.pageSelection]);
+
+  // The key lives in server memory, so recheck when a restart may have cleared it.
+  const generatingAny = workspace.canvases.some((c) => c.messages.some((m) => m.status === "pending"));
+  useEffect(() => {
+    const refresh = () =>
+      void api<ProviderStatus>("/api/provider").then(setProvider, () => {});
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [generatingAny]);
+
+  const empty = canvas?.messages.length === 0;
+  const attach = (files: File[]) => {
+    if (canvas) void workspace.attachFiles(canvas.id, files, model.vision);
+  };
+  useEffect(() => {
+    if (!empty) return;
+    const allowDrop = (event: DragEvent) => {
+      if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+    };
+    const drop = (event: DragEvent) => {
+      const files = [...(event.dataTransfer?.files ?? [])];
+      if (event.defaultPrevented || !files.length) return;
+      event.preventDefault();
+      attach(files);
+    };
+    window.addEventListener("dragover", allowDrop);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragover", allowDrop);
+      window.removeEventListener("drop", drop);
+    };
+  }, [empty, canvas?.id, model.vision]);
+
+  const selected = canvas?.messages.find((m) => m.id === canvas.selectedId);
+  if (canvas && selected && (lastRead?.canvasId !== canvas.id || lastRead.message !== selected))
+    setLastRead({ canvasId: canvas.id, message: selected });
+  const readerOpen = !!selected && canvas?.readingPanelOpen !== false;
+  const reading = selected ?? (lastRead?.canvasId === canvas?.id ? lastRead?.message : undefined);
+  useLayoutEffect(() => {
+    const element = stage.current;
+    const dock = composer.current?.closest<HTMLElement>(".composer-dock");
+    if (!element || !dock) return;
+    const measure = () => element.style.setProperty("--composer-height", `${dock.offsetHeight}px`);
+    const observer = new ResizeObserver(measure);
+    observer.observe(dock);
+    measure();
+    return () => {
+      observer.disconnect();
+      element.style.removeProperty("--composer-height");
+    };
+  }, [canvas?.id, empty, !!selected]);
+
+  if (workspace.loading)
+    return (
+      <main className="startup">
+        <CanvasMark />
+        <LoaderCircle className="spin" size={20} />
+        <p>Opening your workspace…</p>
+      </main>
+    );
+  if (workspace.loadError || !canvas)
+    return (
+      <main className="startup">
+        <CanvasMark />
+        <h1>Your workspace needs a moment.</h1>
+        <p role="alert">
+          {workspace.loadError || "Could not open this canvas."}
+        </p>
+        <button className="primary" onClick={() => location.reload()}>
+          Try opening again
+        </button>
+        <small>Existing browser data has not been deleted.</small>
+      </main>
+    );
+  const generating = canvas.messages.some((m) => m.status === "pending");
+  const parent = canvas.messages.find((m) => m.id === canvas.draftParentId);
+  const select = (id: string) => workspace.selectMessage(canvas.id, id);
+
+  return (
+    <ImageLoaderContext.Provider value={workspace.loadImage}>
+      <div className="app-shell">
+        <Sidebar
+          canvases={workspace.canvases}
+          activeId={canvas.id}
+          collapsed={sidebarCollapsed}
+          onCollapse={() => { setSidebarCollapsed(true); workspace.setPreference(SIDEBAR_KEY, "collapsed"); }}
+          onCreate={() => {
+            setCamera(undefined);
+            workspace.createCanvas();
+            if (matchMedia("(max-width: 700px)").matches) { setSidebarCollapsed(true); workspace.setPreference(SIDEBAR_KEY, "collapsed"); }
+            composer.current?.focus({ preventScroll: true });
+          }}
+          onSelect={(id) => {
+            if (id !== canvas.id) setCamera(undefined);
+            workspace.selectCanvas(id);
+            if (matchMedia("(max-width: 700px)").matches) { setSidebarCollapsed(true); workspace.setPreference(SIDEBAR_KEY, "collapsed"); }
+          }}
+          onExport={workspace.exportCanvas}
+          saveState={workspace.saveState}
+          preferenceError={workspace.preferenceError}
+          onRetrySave={() => void workspace.retrySave()}
+          connected={provider.connected}
+          onProvider={() => setProviderOpen(true)}
+        />
+        <ReactFlowProvider key={canvas.id}>
+          <main className="main-workspace">
+            <div ref={stage} className={`workspace-stage ${empty ? "empty" : ""}`} data-reading={readerOpen}>
+              {!empty && (
+                <Graph
+                  canvas={canvas}
+                  camera={camera}
+                  onGeometry={rectangles => { geometry.current = rectangles; }}
+                  onSelect={select}
+                  onDeselect={() => workspace.deselect(canvas.id)}
+                  onGroupSelection={active => workspace.setGroupSelection(canvas.id, active)}
+                  onRetry={(id) => void workspace.retry(canvas.id, id)}
+                  onAppearance={(id, patch) => {
+                    setCamera({ ids: [id] });
+                    void workspace.update(canvas.id, (c) => ({ ...c, messages: c.messages.map((m) => m.id === id ? { ...m, ...patch } : m) }));
+                  }}
+                  onResize={(id, size, position, offset) => {
+                    void workspace.update(canvas.id, (c) => ({ ...c, layout: "force-v2", messages: c.messages.map((m) => m.id === id ? { ...m, placementOffset: undefined, position, sizes: { ...m.sizes, [m.displayMode || "preview"]: size }, ...(offset ? { layoutOffset: offset } : {}) } : m) }));
+                  }}
+                  onLayout={(positions, rebase) => {
+                    void workspace.update(canvas.id, (c) => ({
+                      ...c,
+                      layout: "force-v2",
+                      messages: c.messages.map((m) => {
+                        const position = positions.get(m.id) ?? m.position;
+                        if (!rebase) return position.x === m.position.x && position.y === m.position.y ? m : { ...m, position };
+                        const parent = c.messages.find(p => p.id === visualParent(m));
+                        const parentPosition = parent ? positions.get(parent.id) ?? parent.position : undefined;
+                        const own = geometry.current[m.id], anchor = parent ? geometry.current[parent.id] : undefined;
+                        return { ...m, position, ...(parentPosition ? {
+                          ...(m.placementOffset ? { placementOffset: { x: position.x-parentPosition.x, y: position.y-parentPosition.y } } : {}),
+                          layoutOffset: { x: position.x-parentPosition.x + ((own?.width ?? 520)-(anchor?.width ?? 520))/2, y: position.y-parentPosition.y + ((own?.height ?? 210)-(anchor?.height ?? 210))/2 },
+                        } : {}) };
+                      }),
+                    }));
+                  }}
+                  onDrop={(positions, offsets) => {
+                    void workspace.update(canvas.id, (c) => ({
+                      ...c,
+                      layout: "force-v2",
+                      messages: c.messages.map((m) =>
+                        positions.has(m.id)
+                          ? {
+                              ...m,
+                              position: positions.get(m.id)!,
+                              placementOffset: undefined,
+                              ...(offsets.has(m.id) ? { layoutOffset: offsets.get(m.id) } : {}),
+                            }
+                          : m,
+                      ),
+                    }));
+                  }}
+                  onViewport={(viewport) => {
+                    void workspace.update(canvas.id, (c) =>
+                      c.viewport.x === viewport.x && c.viewport.y === viewport.y && c.viewport.zoom === viewport.zoom
+                        ? c : { ...c, viewport });
+                  }}
+                />
+              )}
+              <TopBar
+                canvas={canvas}
+                empty={empty}
+                sidebarCollapsed={sidebarCollapsed}
+                onShowSidebar={() => { setSidebarCollapsed(false); workspace.setPreference(SIDEBAR_KEY, "open"); }}
+                onSelect={(id) => {
+                  select(id);
+                  setCamera({ ids: [id] });
+                }}
+              />
+              <ContextMeter
+                tokens={
+                  canvas.selectedId
+                    ? contextTokens(canvas, canvas.selectedId)
+                    : null
+                }
+                limit={model.contextWindow}
+                request={workspace.chatRequest?.canvasId === canvas.id
+                  ? workspace.chatRequest.sequence
+                  : undefined}
+              />
+              {(empty || selected) && (
+                <Composer
+                  canvas={canvas}
+                  empty={empty}
+                  parent={parent}
+                  generating={generating}
+                  notice={workspace.notice}
+                  models={MODELS}
+                  model={model}
+                  connected={provider.connected}
+                  onConnect={() => setProviderOpen(true)}
+                  branchImages={branchImageCount(canvas)}
+                  branchBytes={ancestorPath(canvas, canvas.editingId ? canvas.messages.find(m => m.id === canvas.editingId)?.parentId ?? null : canvas.draftParentId).flatMap(m => m.images ?? []).reduce((sum, image) => sum + (image.bytes ?? 0), 0)}
+                  textarea={composer}
+                  onDraft={(draft) =>
+                    void workspace.update(canvas.id, (c) => ({ ...c, draft }))
+                  }
+                  onSubmit={() => {
+                    void workspace.send(
+                      canvas.id,
+                      canvas.draft,
+                      canvas.draftParentId,
+                      model.id,
+                      (ids, first) => setCamera({ ids: first ? [ids[1]] : ids, first, center: true, followId: ids[1] }),
+                      geometry.current,
+                    );
+                    composer.current?.focus({ preventScroll: true });
+                  }}
+                  onAttach={attach}
+                  preparing={workspace.preparing}
+                  preparationProgress={workspace.preparationProgress}
+                  onCancelPreparation={workspace.cancelPreparation}
+                  welcome={empty && (
+                    <h1 className="welcome-heading">
+                      <span>Canvas</span>
+                    </h1>
+                  )}
+                  onRemoveImage={(id) =>
+                    workspace.removeDraftImage(canvas.id, id)
+                  }
+                  onCancelEdit={() => workspace.cancelEdit(canvas.id)}
+                  onDismissNotice={workspace.dismissNotice}
+                  onModel={(id) => { setModelId(id); workspace.setPreference(MODEL_KEY, id); }}
+                />
+              )}
+              {selected && !readerOpen && <button className="reader-reopen icon-button" aria-label="Open reading panel" aria-controls="reading-panel" aria-expanded={false} onClick={() => void workspace.update(canvas.id, c => ({ ...c, readingPanelOpen: true }))}><ChevronLeft size={18} /></button>}
+              <aside
+                id="reading-panel"
+                className="reading-panel"
+                data-open={readerOpen}
+                inert={!readerOpen}
+                aria-hidden={!readerOpen}
+                aria-label="Full message"
+              >
+                {reading && (
+                  <ReadingPanel
+                    message={reading}
+                    canEdit={!generating && !workspace.preparing}
+                    onEdit={() => workspace.startEdit(canvas.id, reading.id)}
+                    onClose={() => { void workspace.update(canvas.id, c => ({ ...c, readingPanelOpen: false })); composer.current?.focus({ preventScroll: true }); }}
+                  />
+                )}
+              </aside>
+            </div>
+          </main>
+        </ReactFlowProvider>
+        {workspace.pageSelection && (
+          <DocumentPages selection={workspace.pageSelection} cancel={workspace.cancelPreparation} />
+        )}
+        {providerOpen && (
+          <ProviderDialog
+            status={provider}
+            onChange={setProvider}
+            onClose={() => {
+              setProviderOpen(false);
+              composer.current?.focus({ preventScroll: true });
+            }}
+          />
+        )}
+      </div>
+    </ImageLoaderContext.Provider>
+  );
+}
