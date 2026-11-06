@@ -2,7 +2,7 @@
   "name": "canvas",
   "version": "0.4.0",
   "private": true,
-  "description": "A visual conversation tree for AI chats: branch, revisit and follow any thread. Runs on your own machine with your DeepSeek key.",
+  "description": "A visual conversation tree for AI chats: branch, revisit and follow any thread. Runs on your own machine with your own key from OpenAI, Anthropic, Gemini, DeepSeek, OpenRouter, Ollama or any OpenAI-compatible provider.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -14,7 +14,8 @@
     "start": "node --env-file-if-exists=.env --import tsx server/index.ts --production",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:e2e": "node --test tests/browser.test.mjs"
+    "test:e2e": "node --test tests/browser.test.mjs",
+    "catalog": "tsx scripts/update-catalog.ts"
   },
   "dependencies": {
     "@xyflow/react": "^12.0.0",

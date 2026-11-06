@@ -4,10 +4,11 @@ import path from "node:path";
 import express from "express";
 import { createApp } from "./app";
 import { loadConfig } from "./config";
+import { presetById } from "../shared/providers";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const { port, deepseekApiKey } = loadConfig();
-const app = createApp({ apiKey: deepseekApiKey });
+const { port, connections } = loadConfig();
+const app = createApp({ connections });
 const server = createServer(app);
 if (process.argv.includes("--production")) {
   app.use(express.static(path.join(root, "dist")));
@@ -23,11 +24,14 @@ if (process.argv.includes("--production")) {
   });
   app.use(vite.middlewares);
 }
-server.requestTimeout = 135_000;
+// Answers aren't streamed, and reasoning models can take minutes.
+server.requestTimeout = 315_000;
 server.listen(port, "127.0.0.1", () =>
   console.log(
     `Canvas is ready at http://127.0.0.1:${port}` +
-      (deepseekApiKey ? "" : ". Open it and connect your DeepSeek key."),
+      (connections.length
+        ? `, connected to ${connections.map((c) => presetById(c.id)!.name).join(", ")} from the environment.`
+        : ". Open it and connect a provider."),
   ),
 );
 server.on("error", (error) => {

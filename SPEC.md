@@ -6,7 +6,7 @@
 
 **MVP success:** A user starts a conversation, creates multiple branches, and resumes any branch with the correct conversation context.
 
-Canvas runs with DeepSeek inference, behind an adapter so other providers can be added later. It runs on the user's own machine, with no sign-in or credit limits. The user connects their own DeepSeek key in the app for the server session, or sets it in `.env`.
+Canvas runs on the user's own machine, with no sign-in or credit limits. The user brings their own keys for any of about 30 OpenAI-compatible providers (OpenAI, Anthropic and Gemini through their compatibility endpoints, DeepSeek, OpenRouter, local servers such as Ollama, or a custom endpoint), connected in the app for the server session or set in `.env`. A hosted version with sign-in, sharing and collaboration lives outside this repository.
 
 ## Core Experience
 
@@ -16,8 +16,8 @@ Canvas runs with DeepSeek inference, behind an adapter so other providers can be
 4. **Create an alternative:** Submitting another follow-up from a message that already has a continuation creates a branch beside the existing path.
 5. **Revisit any message:** Users can select any completed user or assistant bubble and create a follow-up. Branches from user bubbles appear sideways, preserving the original prompt-and-answer pair.
 6. **Edit a prompt (v0.2):** Editing a prompt creates a rewritten prompt that branches sideways from the original bubble; its new answer hangs below it. The rewrite replaces the original in context, and the original and its replies stay unchanged.
-7. **Attach images (v0.2):** Prompts can include up to six images (picker, paste or drop), shown whole in the prompt bubble. They are sent as PNG, JPEG, GIF or WebP; other formats the browser can decode are converted first. DeepSeek Flash receives them as image inputs; image-only prompts are allowed.
-8. **Choose a model (v0.3):** DeepSeek Flash or DeepSeek V4 Pro, with the same key. V4 Pro cannot see images: it receives a text note in place of each image in the branch, and attaching is disabled while it is selected.
+7. **Attach images (v0.2):** Prompts can include up to six images (picker, paste or drop), shown whole in the prompt bubble. They are sent as PNG, JPEG, GIF or WebP; other formats the browser can decode are converted first. Models that see images receive them as image inputs; image-only prompts are allowed.
+8. **Choose a model (v0.3):** Any model from any connected provider, grouped by provider in a searchable menu, or a typed model id. Each answer records its provider and model. Models that cannot see images receive a text note in place of each image in the branch, and attaching is disabled while one is selected.
 
 Visible connectors show each message’s parent: continuations connect bottom to top, and side branches connect bubble sides. Selecting a bubble highlights its path back to the root and shows that path as a flowchart in the top bar. A “Go to root” control returns the viewport to the initial prompt.
 
@@ -32,7 +32,7 @@ Visible connectors show each message’s parent: continuations connect bottom to
 - Flat, borderless bubbles with no header or footer: white for prompts, larger grey bubbles for answers, green when selected. Each bubble shows a subtle timestamp in its bottom-left corner.
 - Answer bubbles have bounded Markdown previews. The full content opens in a right-hand reading panel without moving the graph.
 - A collapsible sidebar; the collapsed state is remembered in the local workspace.
-- A context meter anchored bottom-left shows the selected branch’s tokens against the model’s 1M-token window, using DeepSeek’s reported usage where available and an estimate otherwise.
+- A context meter anchored bottom-left shows the selected branch’s tokens against the chosen model’s context window (from the bundled models.dev catalog; tokens only when unknown), using the provider’s reported usage where available and an estimate otherwise.
 - Assistant responses support Markdown headings, nested lists, links, blockquotes, tables, inline code, and fenced code blocks. Raw HTML is disabled.
 - The sidebar lists saved canvases and provides “New canvas”.
 
@@ -50,7 +50,8 @@ Visible connectors show each message’s parent: continuations connect bottom to
 **Local server**
 
 - One local server, listening on `127.0.0.1` only, serves the interface and API; provider requests pass through it. API requests for other hostnames or from other origins are refused.
-- **DeepSeek key (session):** the user enters a key in the app's DeepSeek settings. The server checks it against DeepSeek's balance endpoint without inference and keeps it in process memory until **Disconnect** or a restart. A key that works but has no balance is refused with a distinct message. An optional `DEEPSEEK_API_KEY` in `.env` connects at startup. The key is never returned by the API, stored in the browser, written to disk or logged. Without a key, prompts can be drafted but not sent; a disconnected chat request fails with `not_connected` and the answer stays retryable. Disconnect stops answers in progress.
+- **Provider keys (session):** the user connects any number of providers in the app's provider dialog. The server checks each key without inference (DeepSeek's balance, OpenRouter's key endpoint, Vercel's credits, or the model list) and keeps it in process memory until **Disconnect** or a restart. A DeepSeek key that works but has no balance is refused with a distinct message. Each provider's standard variable in `.env` (for example `OPENAI_API_KEY`) connects it at startup. Keys are never returned by the API, stored in the browser, written to disk or logged. Base URLs must be https, except for loopback and private-network servers; entered base URLs are saved, and keyless local servers reconnect at startup. Without a connected provider, prompts can be drafted but not sent; a chat request for a disconnected provider fails with `not_connected` and the answer stays retryable. Disconnect stops that provider's answers in progress.
+- **Requests:** non-streaming Chat Completions with a 4,096-token output cap (16,384 for reasoning models) and a 300-second timeout. DeepSeek receives images through its Files API with thinking disabled; other providers receive them inline. Usage records an estimated cost from catalog list prices, or the provider's reported charge.
 
 **Storage**
 
@@ -60,7 +61,7 @@ Visible connectors show each message’s parent: continuations connect bottom to
 - Save a prompt and pending answer before requesting inference; visibly report storage failures.
 - The server keeps no transcripts.
 
-**Deferred:** Additional providers, cloud sync, collaboration, non-image attachments, tools, search, branch merging, in-place message editing, response regeneration, and mobile optimization.
+**Deferred:** Native (non-OpenAI-compatible) provider APIs, cloud sync, collaboration, non-image attachments, tools, search, branch merging, in-place message editing, response regeneration, and mobile optimization.
 
 ## Acceptance Scenarios
 
@@ -76,7 +77,8 @@ Visible connectors show each message’s parent: continuations connect bottom to
 - Full Markdown answers can be read in the reading panel without changing node positions.
 - Deselecting hides the panel and composer; selecting another bubble replaces the panel content.
 - An edited prompt branches from the original and its request excludes the original prompt.
-- An attached image reaches DeepSeek as an image input and survives a reload.
+- An attached image reaches a model that sees images as an image input and survives a reload.
+- Several providers can be connected at once; an answer uses the provider and model it was requested with, and disconnecting one provider leaves the others connected.
 - The context meter and the top-bar path follow the selected bubble.
 
 

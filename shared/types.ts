@@ -1,4 +1,4 @@
-import type { ModelInfo } from "./models";
+import type { Preset } from "./providers";
 
 export type Role = "user" | "assistant";
 // Browser requests use local attachment IDs; legacy callers may still send data URLs.
@@ -17,9 +17,11 @@ export type ImageRef = {
 export type Usage = {
   promptTokens: number;
   completionTokens: number;
-  // Billing detail DeepSeek reports; the context meter ignores it.
+  // Billing detail some providers report; the context meter ignores it.
   promptCacheHitTokens?: number;
   promptCacheMissTokens?: number;
+  // Estimated USD: the provider's reported charge, or catalog list prices.
+  cost?: number;
 };
 export type Message = {
   role: Role;
@@ -31,7 +33,9 @@ export type Message = {
   status: "complete" | "pending" | "error" | "interrupted";
   error?: string;
   truncated?: boolean;
-  // The model requested for an answer; retries reuse it.
+  // The provider and model requested for an answer; retries reuse them.
+  // Answers without a provider were written by DeepSeek.
+  provider?: string;
   model?: string;
   completedAt?: number;
   images?: ImageRef[];
@@ -71,23 +75,17 @@ export type Completion = {
   finishReason: "stop" | "length";
   usage?: Usage;
 };
-// Never includes the key itself.
-export type ProviderStatus = {
-  connected: boolean;
-  // "env" for DEEPSEEK_API_KEY at startup, "session" for a key entered in the app.
-  source: "env" | "session" | null;
-};
-export type ProviderAdapter = {
+// Never includes a key.
+export type ProviderConnection = {
   id: string;
-  models: ModelInfo[];
-  // Checks a key without inference. `available` is false when the account has no balance.
-  validateKey?(key: string, signal: AbortSignal): Promise<{ available: boolean }>;
-  upload?(key: string, bytes: Uint8Array, mime: string, signal: AbortSignal): Promise<string>;
-  // Throws an ApiError for errors DeepSeek reports.
-  generate(
-    key: string,
-    model: string,
-    messages: ChatMessage[],
-    signal: AbortSignal,
-  ): Promise<Completion>;
+  // "env" for a key from .env, "session" for one entered in the app,
+  // "saved" for a keyless local server remembered between restarts.
+  source: "env" | "session" | "saved";
+  baseUrl: string;
+};
+export type ProvidersState = {
+  presets: Preset[];
+  connected: ProviderConnection[];
+  // Addresses entered earlier, to fill in the form again.
+  savedBaseUrls: Record<string, string>;
 };

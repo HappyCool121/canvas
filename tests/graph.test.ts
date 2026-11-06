@@ -268,8 +268,13 @@ test("canvas billing reports partial usage for older answers and uses current Fl
   assert.equal(usage.tokens, 3000);
   assert.equal(usage.missingUsage, true);
   assert.equal(usage.partial, true);
-  assert.ok(Math.abs(usage.offPeak - 0.0015896) < 1e-12);
-  assert.equal(usage.peak, usage.offPeak * 2);
+  assert.ok(Math.abs(usage.cost - 0.0015896) < 1e-12);
+  // Stored costs win; another provider's answer without one is partial.
+  const withCost = patchMessage(canvas, first.answerId, { provider: "openai", model: "gpt-x", usage: { promptTokens: 10, completionTokens: 5, cost: 0.25 } });
+  assert.ok(Math.abs(canvasUsage(withCost).cost - 0.2515896) < 1e-12);
+  assert.equal(canvasUsage(withCost).missingUsage, false);
+  const unpriced = patchMessage(withCost, first.answerId, { provider: "ollama", model: "llama3", usage: { promptTokens: 10, completionTokens: 5 } });
+  assert.equal(canvasUsage(unpriced).partial, true);
 });
 
 test("placement uses measured rectangles, avoids a crowded side, and leaves existing positions untouched", () => {

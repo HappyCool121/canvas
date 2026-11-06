@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 import type { Canvas, Message } from "../shared/types";
-import type { ModelInfo } from "../shared/models";
+import { MODEL_ID, modelKey, unknownModel, type ModelInfo } from "../shared/models";
 import { groupAttachments, isImageFile, MAX_IMAGES, documentLabel, Thumbnail } from "./images";
 import { plainText } from "./Markdown";
 
@@ -22,18 +22,23 @@ const imageFiles = (list: FileList | null | undefined) =>
 function ModelMenu({
   models,
   model,
+  providers,
   connected,
   onModel,
 }: {
   models: ModelInfo[];
   model: ModelInfo;
+  // Connected providers, for typing a model the list doesn't show.
+  providers: { id: string; name: string }[];
   connected: boolean;
-  onModel: (id: string) => void;
+  onModel: (model: ModelInfo) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
+    setQuery("");
     // Capture first so Escape closes the menu without deselecting the bubble.
     const key = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -50,6 +55,17 @@ function ModelMenu({
       window.removeEventListener("pointerdown", pointer, true);
     };
   }, [open]);
+  const search = query.trim().toLowerCase();
+  const shown = search
+    ? models.filter((m) => `${m.label} ${m.id} ${m.providerName}`.toLowerCase().includes(search))
+    : models;
+  const groups = [...new Set(shown.map((m) => m.providerName))];
+  const typed = query.trim();
+  const custom = MODEL_ID.test(typed) && !models.some((m) => m.id === typed) ? providers : [];
+  const choose = (option: ModelInfo) => {
+    onModel(option);
+    setOpen(false);
+  };
   return (
     <div className="model-menu" ref={root}>
       <button
@@ -66,24 +82,49 @@ function ModelMenu({
       </button>
       {open && (
         <div className="model-options" role="menu" aria-label="Choose a model">
-          {models.map((option) => (
-            <button
-              type="button"
-              key={option.id}
-              role="menuitemradio"
-              aria-checked={option.id === model.id}
-              onClick={() => {
-                onModel(option.id);
-                setOpen(false);
-              }}
-            >
-              <span>
-                <strong>{option.label}</strong>
-                <small>{option.description}</small>
-              </span>
-              {option.id === model.id && <Check size={14} />}
-            </button>
-          ))}
+          {(models.length > 8 || providers.length > 0) && (
+            <input
+              className="model-search"
+              aria-label="Search models"
+              placeholder={providers.length ? "Search, or type a model id" : "Search models"}
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          )}
+          <div className="model-list">
+            {groups.map((group) => (
+              <div key={group} role="group" aria-label={group}>
+                <span className="model-group">{group}</span>
+                {shown.filter((m) => m.providerName === group).map((option) => (
+                  <button
+                    type="button"
+                    key={modelKey(option.provider, option.id)}
+                    role="menuitemradio"
+                    aria-checked={option.provider === model.provider && option.id === model.id}
+                    onClick={() => choose(option)}
+                  >
+                    <span>
+                      <strong>{option.label}</strong>
+                      <small>{option.description}</small>
+                    </span>
+                    {option.provider === model.provider && option.id === model.id && <Check size={14} />}
+                  </button>
+                ))}
+              </div>
+            ))}
+            {custom.map((p) => (
+              <button type="button" role="menuitem" key={p.id} onClick={() => choose(unknownModel(p.id, p.name, typed))}>
+                <span>
+                  <strong>Use “{typed}”</strong>
+                  <small>with {p.name}</small>
+                </span>
+              </button>
+            ))}
+            {!shown.length && !custom.length && (
+              <p className="model-empty">{providers.length ? "No matching models. Type a full model id to use it." : "Connect a provider to choose a model."}</p>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -103,6 +144,7 @@ export function Composer({
   notice,
   models,
   model,
+  providers,
   connected,
   onConnect,
   branchImages,
@@ -127,6 +169,7 @@ export function Composer({
   notice: string;
   models: ModelInfo[];
   model: ModelInfo;
+  providers: { id: string; name: string }[];
   connected: boolean;
   onConnect: () => void;
   // Images already in the branch this prompt continues.
@@ -143,7 +186,7 @@ export function Composer({
   onRemoveImage: (id: string) => void;
   onCancelEdit: () => void;
   onDismissNotice: () => void;
-  onModel: (id: string) => void;
+  onModel: (model: ModelInfo) => void;
 }) {
   useLayoutEffect(() => {
     const field = textarea.current;
@@ -188,11 +231,9 @@ export function Composer({
     !blockedImages &&
     Boolean(canvas.draft.trim() || images.length);
   const hint = blockedImages
-    ? images.some((image) => image.docx)
-      ? "Switch to DeepSeek Flash to send DOCX pages"
-      : images.some((image) => image.pdf)
-        ? "Switch to DeepSeek Flash to send PDF pages"
-        : "Switch to DeepSeek Flash to send images"
+    ? `${model.label} can’t see ${images.some((image) => image.docx)
+      ? "DOCX pages"
+      : images.some((image) => image.pdf) ? "PDF pages" : "images"}. Choose a model that can.`
     : !model.vision && branchImages
       ? `${model.label} can’t see the ${branchImages === 1 ? "image" : `${branchImages} images`} in this branch`
       : null;
@@ -314,7 +355,7 @@ export function Composer({
               title={
                 model.vision
                   ? `Attach up to ${Math.max(0, MAX_IMAGES - branchImages - images.length)} more images or document pages`
-                  : "Switch to DeepSeek Flash to attach images or document pages"
+                  : `${model.label} can’t see images. Choose a model that can to attach images or document pages`
               }
               disabled={preparing || !model.vision || images.length + branchImages >= MAX_IMAGES}
               onClick={() => fileInput.current?.click()}
@@ -335,6 +376,7 @@ export function Composer({
             <ModelMenu
               models={models}
               model={model}
+              providers={providers}
               connected={connected}
               onModel={onModel}
             />
@@ -348,7 +390,7 @@ export function Composer({
             )}
             {!connected && (
               <button type="button" className="connect-prompt" onClick={onConnect}>
-                <KeyRound size={13} /> Connect DeepSeek to send
+                <KeyRound size={13} /> Connect a provider to send
               </button>
             )}
             {hint && (

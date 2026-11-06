@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { checkImageBudget, MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES } from "../shared/attachments";
-import { deepseek } from "../server/provider";
+import { openAICompatible } from "../server/provider";
+import { presetById } from "../shared/providers";
 
 test("attachment budgets include every occurrence across a request", () => {
   checkImageBudget(Array(600).fill(1));
@@ -13,19 +14,19 @@ test("attachment budgets include every occurrence across a request", () => {
 
 test("Files API uses expiring uploads, reuses matching bytes and keeps file references in provider requests", async () => {
   const requests: { url: string; init?: RequestInit }[] = [];
-  const provider = deepseek((async (url, init) => {
+  const provider = openAICompatible(presetById("deepseek")!, { key: "synthetic-key", baseUrl: "https://api.deepseek.com" }, (async (url, init) => {
     requests.push({ url: String(url), init });
     if (String(url).endsWith("/files")) return Response.json({ id: "file-api-test", expires_at: Math.floor(Date.now()/1000)+86400 });
     return Response.json({ choices: [{ message: { content: "OK" }, finish_reason: "stop" }] });
   }) as typeof fetch);
   const signal = new AbortController().signal;
   const bytes = new Uint8Array([1,2,3]);
-  const id = await provider.upload!("synthetic-key", bytes, "image/png", signal);
-  assert.equal(await provider.upload!("synthetic-key", bytes, "image/png", signal), id);
+  const id = await provider.upload!(bytes, "image/png", signal);
+  assert.equal(await provider.upload!(bytes, "image/png", signal), id);
   assert.equal(requests.length, 1);
   const form = requests[0].init!.body as FormData;
   assert.equal(form.get("expires_after[seconds]"), "86400");
-  await provider.generate("synthetic-key", "deepseek-flash", [{ role: "user", content: "Read", fileIds: [id] }], signal);
+  await provider.generate("deepseek-flash", [{ role: "user", content: "Read", fileIds: [id] }], signal);
   assert.deepEqual(JSON.parse(requests[1].init!.body as string).messages[1].content[1], { type: "file", file_id: id });
 });
 

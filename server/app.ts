@@ -2,9 +2,12 @@ import { createReadStream } from "node:fs";
 import { checkImageBudget, MAX_IMAGES, MAX_REQUEST_BYTES } from "../shared/attachments";
 import express from "express";
 import { createWorkspace, validId, validCanvas } from "./workspace";
-import type { ChatMessage, ProviderAdapter, ProviderStatus } from "../shared/types";
-import { ApiError, deepseek } from "./provider";
-import { DEFAULT_MODEL } from "../shared/models";
+import type { ChatMessage, ProviderConnection, ProvidersState } from "../shared/types";
+import { ApiError, openAICompatible, type ConnectionSettings, type ProviderAdapter } from "./provider";
+import { catalogIds, modelInfo } from "./catalog";
+import type { EnvConnection } from "./config";
+import { LEGACY_MODEL, LEGACY_PROVIDER, MODEL_ID } from "../shared/models";
+import { PRESETS, presetById, unfinishedBaseUrl, type Preset } from "../shared/providers";
 
 const MAX_IMAGES_PER_MESSAGE = MAX_IMAGES;
 const MAX_IMAGE_URL_LENGTH = Math.ceil(32 * 1024 * 1024 / 3) * 4 + 64;
@@ -31,34 +34,102 @@ function validMessage(m: ChatMessage) {
   );
 }
 
+// Plain http is fine for this computer and the local network; anything else needs https.
+function privateAddress(hostname: string) {
+  return /^(localhost|.+\.localhost|.+\.local|\[::1\]|127(\.\d+){3}|10(\.\d+){3}|192\.168(\.\d+){2}|172\.(1[6-9]|2\d|3[01])(\.\d+){2})$/i.test(hostname);
+}
+function checkBaseUrl(preset: Preset, raw: unknown) {
+  const url = typeof raw === "string" && raw.trim() ? raw.trim().replace(/\/+$/, "") : preset.baseUrl;
+  const invalid = (message: string) => new ApiError(400, "invalid_base_url", message);
+  if (!url || unfinishedBaseUrl(url)) throw invalid(`Enter the full base URL for ${preset.name}.`);
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { throw invalid("Enter a base URL such as https://api.example.com/v1."); }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || url.length > 500)
+    throw invalid("Enter the base URL without a user name, query or fragment.");
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && privateAddress(parsed.hostname)))
+    throw invalid("Use an https:// address. Plain http:// works only for this computer or your local network.");
+  return url;
+}
+
+type Connection = {
+  preset: Preset;
+  settings: ConnectionSettings;
+  source: ProviderConnection["source"];
+  adapter: ProviderAdapter;
+  models?: Promise<string[]>;
+};
+// Saved per provider in preferences.json: never a key, only the address, and
+// whether a keyless local server should reconnect at startup.
+type Saved = Record<string, { baseUrl?: string; keyless?: boolean }>;
+const SAVED_KEY = "canvas.providers";
+
 type Options = {
-  provider?: ProviderAdapter;
-  // Optional DeepSeek key from .env. Never sent to the browser.
-  apiKey?: string;
+  fetcher?: typeof fetch;
+  // Builds the adapter for a connection; tests replace it.
+  adapter?: (preset: Preset, settings: ConnectionSettings) => ProviderAdapter;
+  // Providers connected from .env. Keys are never sent to the browser.
+  connections?: EnvConnection[];
   timeoutMs?: number;
   dataDir?: string;
 };
 export function createApp({
-  provider = deepseek(),
-  apiKey: initialKey,
-  timeoutMs = 120_000,
+  fetcher = fetch,
+  adapter = (preset, settings) => openAICompatible(preset, settings, fetcher),
+  connections: initial = [],
+  timeoutMs = 300_000,
   dataDir,
 }: Options = {}) {
   const app = express();
   app.disable("x-powered-by");
   const workspace = createWorkspace(dataDir);
-  const active = new Map<string, AbortController>();
-  // The key lives only in this process's memory: a key entered in the app lasts
-  // until Disconnect or a restart. It is never returned, stored or logged.
-  let apiKey = initialKey;
-  let source: ProviderStatus["source"] = initialKey ? "env" : null;
-  let connectionVersion = 0;
-  const connectionControllers = new Set<AbortController>();
-  const status = (): ProviderStatus => ({ connected: Boolean(apiKey), source: apiKey ? source : null });
+  const active = new Map<string, { controller: AbortController; provider: string }>();
+  // Keys live only in this process's memory: a key entered in the app lasts
+  // until Disconnect or a restart. They are never returned, stored or logged.
+  const connections = new Map<string, Connection>();
+  const connect = (preset: Preset, settings: ConnectionSettings, source: Connection["source"]) =>
+    connections.set(preset.id, { preset, settings, source, adapter: adapter(preset, settings) });
+  for (const c of initial) {
+    const preset = presetById(c.id);
+    if (preset) connect(preset, { key: c.key, baseUrl: c.baseUrl }, "env");
+  }
+  let saved: Saved = {};
+  const restored = workspace.preferences().then((values) => {
+    try { saved = JSON.parse(values[SAVED_KEY] || "{}"); } catch { saved = {}; }
+    for (const [id, entry] of Object.entries(saved)) {
+      const preset = presetById(id);
+      if (preset?.keyless && entry.keyless && entry.baseUrl && !connections.has(id))
+        connect(preset, { baseUrl: entry.baseUrl }, "saved");
+    }
+  }).catch(() => {});
+  const remember = (id: string, entry: Saved[string] | undefined) => {
+    saved = { ...saved };
+    if (entry) saved[id] = entry; else delete saved[id];
+    return workspace.setPreferences({ values: { [SAVED_KEY]: JSON.stringify(saved) } }).catch(() => {});
+  };
+  const versions = new Map<string, number>();
+  const checks = new Map<string, Set<AbortController>>();
+  const state = (): ProvidersState => ({
+    presets: PRESETS,
+    connected: [...connections.values()].map(({ preset, settings, source }) => ({ id: preset.id, source, baseUrl: settings.baseUrl })),
+    savedBaseUrls: Object.fromEntries(Object.entries(saved).flatMap(([id, entry]) => (entry.baseUrl ? [[id, entry.baseUrl]] : []))),
+  });
+  // Live model lists filtered to the catalog's chat models, or the catalog when
+  // the provider doesn't list them. Local servers always show their own.
+  const modelIds = (connection: Connection) => {
+    connection.models ??= (async () => {
+      const live = await connection.adapter.listModels(AbortSignal.timeout(10_000)).catch(() => []);
+      if (!live.length) connection.models = undefined;
+      if (privateAddress(new URL(connection.settings.baseUrl).hostname)) return live;
+      const known = new Set(catalogIds(connection.preset.id));
+      const listed = live.filter((id) => known.has(id));
+      return listed.length ? listed : live.length ? live : [...known];
+    })();
+    return connection.models;
+  };
 
   app.use("/api", (req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
-    // Only this machine's own pages may use the key: the Host check stops DNS
+    // Only this machine's own pages may use the keys: the Host check stops DNS
     // rebinding, and writes must come from the same local origin.
     const host = req.headers.host || "";
     const localHost = /^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host);
@@ -79,40 +150,46 @@ export function createApp({
     next();
   });
   app.get("/api/health", (_req, res) => res.json({ ok: true }));
-  app.get("/api/models", (_req, res) => res.json({ models: provider.models }));
-  // DeepSeek accepts request bodies up to 48 MiB; images make up most of it.
+  // Requests up to 48 MiB; images make up most of it.
   app.use("/api", (req, res, next) => req.path.startsWith("/workspace/attachments/") ? next() : express.json({ limit: MAX_REQUEST_BYTES })(req, res, next));
+  app.use(["/api/providers", "/api/models", "/api/chat"], (_req, _res, next) => void restored.then(() => next()));
 
-  app.get("/api/provider", (_req, res) => res.json(status()));
-  app.post("/api/provider", async (req, res, next) => {
-    const key = req.body?.key;
-    if (typeof key !== "string" || !/^[\x21-\x7e]{8,512}$/.test(key)) {
-      next(new ApiError(400, "invalid_key", "Enter a valid DeepSeek API key."));
-      return;
-    }
-    if (!provider.validateKey) {
-      next(new ApiError(501, "validation_unavailable", "This provider cannot check keys."));
-      return;
-    }
-    const version = ++connectionVersion;
+  app.get("/api/providers", (_req, res) => res.json(state()));
+  app.get("/api/models", async (_req, res) => {
+    const lists = await Promise.all([...connections.values()].map(async (connection) =>
+      (await modelIds(connection)).map((id) => modelInfo(connection.preset, id)).sort((a, b) => a.label.localeCompare(b.label)),
+    ));
+    res.json({ models: lists.flat() });
+  });
+  app.post("/api/providers/:id", async (req, res, next) => {
+    const preset = presetById(req.params.id);
+    if (!preset) return next(new ApiError(404, "unknown_provider", "Choose a supported provider."));
+    const key = typeof req.body?.key === "string" && req.body.key.trim() ? req.body.key.trim() : undefined;
+    if (key ? !/^[\x21-\x7e]{8,512}$/.test(key) : !preset.keyless || req.body?.key !== undefined && typeof req.body.key !== "string")
+      return next(new ApiError(400, "invalid_key", `Enter a valid ${preset.name} API key.`));
+    let baseUrl: string;
+    try { baseUrl = checkBaseUrl(preset, req.body?.baseUrl); } catch (error) { return next(error); }
+    const version = (versions.get(preset.id) ?? 0) + 1;
+    versions.set(preset.id, version);
     const controller = new AbortController();
-    connectionControllers.add(controller);
+    const pending = checks.get(preset.id) ?? new Set();
+    checks.set(preset.id, pending.add(controller));
     const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, 15_000));
     const disconnected = () => {
       if (!res.writableEnded) controller.abort();
     };
     res.once("close", disconnected);
     try {
-      const { available } = await provider.validateKey(key, controller.signal);
-      if (version !== connectionVersion || controller.signal.aborted) throw new Error("aborted");
-      if (!available)
-        throw new ApiError(402, "insufficient_balance", "This DeepSeek key works, but its account needs more balance. Add funds, then connect again.");
-      apiKey = key;
-      source = "session";
-      res.json(status());
+      const settings = { key, baseUrl };
+      await adapter(preset, settings).validate(controller.signal);
+      if (versions.get(preset.id) !== version || controller.signal.aborted) throw new Error("aborted");
+      connect(preset, settings, "session");
+      const keyless = !key && preset.keyless;
+      await remember(preset.id, baseUrl !== preset.baseUrl || keyless ? { baseUrl, ...(keyless ? { keyless } : {}) } : undefined);
+      res.json(state());
     } catch (error) {
       next(
-        version !== connectionVersion
+        versions.get(preset.id) !== version
           ? new ApiError(409, "connection_changed", "The connection changed. Enter your key again if needed.")
           : controller.signal.aborted
             ? new ApiError(504, "timeout", "The key check timed out. Try again.")
@@ -120,17 +197,20 @@ export function createApp({
       );
     } finally {
       clearTimeout(timer);
-      connectionControllers.delete(controller);
+      pending.delete(controller);
       res.off("close", disconnected);
     }
   });
-  app.delete("/api/provider", (_req, res) => {
-    ++connectionVersion;
-    apiKey = undefined;
-    source = null;
-    for (const controller of connectionControllers) controller.abort();
-    for (const controller of active.values()) controller.abort();
-    res.json(status());
+  app.delete("/api/providers/:id", async (req, res, next) => {
+    const preset = presetById(req.params.id);
+    if (!preset) return next(new ApiError(404, "unknown_provider", "Choose a supported provider."));
+    versions.set(preset.id, (versions.get(preset.id) ?? 0) + 1);
+    connections.delete(preset.id);
+    for (const controller of checks.get(preset.id) ?? []) controller.abort();
+    for (const { controller, provider } of active.values()) if (provider === preset.id) controller.abort();
+    // A disconnected local server no longer reconnects at startup; its address stays for next time.
+    if (saved[preset.id]?.keyless) await remember(preset.id, { baseUrl: saved[preset.id].baseUrl });
+    res.json(state());
   });
 
   // All workspace operations share the localhost Host/Origin guard above.
@@ -144,7 +224,7 @@ export function createApp({
   });
   app.put("/api/workspace/preferences", (req, res, next) => {
     const { activeId, values, importOnly } = req.body || {};
-    if ((activeId !== undefined && !validId(activeId)) || (values !== undefined && (!values || typeof values !== "object" || Object.entries(values).some(([k, v]) => !["canvas.sidebar", "canvas.model"].includes(k) || typeof v !== "string" || v.length > 100)))) return next(new ApiError(400, "invalid_preferences", "Invalid workspace preferences."));
+    if ((activeId !== undefined && !validId(activeId)) || (values !== undefined && (!values || typeof values !== "object" || Object.entries(values).some(([k, v]) => !["canvas.sidebar", "canvas.model"].includes(k) || typeof v !== "string" || v.length > 300)))) return next(new ApiError(400, "invalid_preferences", "Invalid workspace preferences."));
     storage(() => workspace.setPreferences({ activeId, values }, importOnly === true), res, next);
   });
   app.post("/api/workspace/import", (req, res, next) => {
@@ -178,13 +258,16 @@ export function createApp({
       canvasId,
       requestId,
       messages,
-      model = DEFAULT_MODEL,
+      provider: providerId = LEGACY_PROVIDER,
+      model = LEGACY_MODEL,
     } = req.body || {};
     const validId = (id: unknown) =>
       typeof id === "string" && /^[a-zA-Z0-9_-]{1,100}$/.test(id);
     if (
       !validId(canvasId) ||
       !validId(requestId) ||
+      typeof model !== "string" ||
+      !MODEL_ID.test(model) ||
       !Array.isArray(messages) ||
       !messages.length ||
       !messages.every(validMessage) ||
@@ -199,33 +282,35 @@ export function createApp({
       );
       return;
     }
-    const info = provider.models.find((m) => m.id === model);
-    if (!info) {
-      next(new ApiError(400, "unknown_model", "Choose a supported model."));
+    const preset = presetById(providerId);
+    if (!preset) {
+      next(new ApiError(400, "unknown_provider", "Choose a supported provider."));
       return;
     }
+    const connection = connections.get(preset.id);
+    if (!connection) {
+      next(
+        new ApiError(
+          401,
+          "not_connected",
+          `Connect ${preset.name} first, then retry. Your prompt is saved.`,
+        ),
+      );
+      return;
+    }
+    const info = modelInfo(preset, model);
     if (!info.vision && messages.some((m: ChatMessage) => (m.images || m.attachmentIds))) {
       next(
         new ApiError(
           400,
           "image_unsupported",
-          `${info.label} can’t read images. Use DeepSeek Flash for image prompts.`,
-        ),
-      );
-      return;
-    }
-    if (!apiKey) {
-      next(
-        new ApiError(
-          401,
-          "not_connected",
-          "Connect your DeepSeek key first, then retry. Your prompt is saved.",
+          `${info.label} can’t read images. Choose a model that sees images.`,
         ),
       );
       return;
     }
     // A key replaced mid-request must not change the key this answer uses.
-    const key = apiKey;
+    const { adapter: provider } = connection;
     if (active.has(canvasId)) {
       next(
         new ApiError(
@@ -237,7 +322,7 @@ export function createApp({
       return;
     }
     const controller = new AbortController();
-    active.set(canvasId, controller);
+    active.set(canvasId, { controller, provider: preset.id });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const disconnected = () => {
       if (!res.writableEnded) controller.abort();
@@ -254,20 +339,25 @@ export function createApp({
         for (const url of m.images ?? []) sizes.push(Buffer.from(url.split(",")[1], "base64").length);
       }
       try { checkImageBudget(sizes); } catch (error) { throw new ApiError(413, "attachment_limit", (error as Error).message); }
-      if (!messages.some((m: ChatMessage) => m.attachmentIds) && sizes.reduce((a,b) => a+b,0) > 64*1024*1024) throw new ApiError(413, "attachment_limit", "Inline images exceed 64 MiB.");
+      const total = sizes.reduce((a, b) => a + b, 0);
+      if (!messages.some((m: ChatMessage) => m.attachmentIds) && total > 64*1024*1024) throw new ApiError(413, "attachment_limit", "Inline images exceed 64 MiB.");
+      // Without a Files API, images travel inside the request as base64.
+      if (!provider.upload && total * 4 / 3 > MAX_REQUEST_BYTES - 1024 * 1024)
+        throw new ApiError(413, "attachment_limit", `${preset.name} receives images inside each request, which leaves room for about 35 MiB of images. Branch from an earlier message or attach fewer pages.`);
       const resolved: ChatMessage[] = [];
       for (const { role, content, images, attachmentIds } of messages as ChatMessage[]) {
         const fileIds: string[] = [];
+        const inline = [...(images ?? [])];
         for (const id of attachmentIds ?? []) {
-          if (!provider.upload) throw new ApiError(400, "image_unsupported", "This provider cannot upload images.");
           const asset = await workspace.getAttachment(id);
           if (!asset) throw new ApiError(400, "missing_attachment", "An image is missing from local storage.");
-          fileIds.push(await provider.upload(key, asset.bytes, asset.mime, controller.signal));
+          if (provider.upload) fileIds.push(await provider.upload(asset.bytes, asset.mime, controller.signal));
+          else inline.push(`data:${asset.mime};base64,${Buffer.from(asset.bytes).toString("base64")}`);
         }
-        resolved.push({ role, content, ...(images ? { images } : {}), ...(fileIds.length ? { fileIds } : {}) });
+        resolved.push({ role, content, ...(inline.length ? { images: inline } : {}), ...(fileIds.length ? { fileIds } : {}) });
       }
       timer = setTimeout(() => controller.abort(), timeoutMs);
-      const result = await provider.generate(key, info.id, resolved, controller.signal);
+      const result = await provider.generate(model, resolved, controller.signal);
       if (controller.signal.aborted) throw new Error("aborted");
       res.json(result);
     } catch (error) {
@@ -320,7 +410,7 @@ export function createApp({
           ? "This conversation is too large to send. Branch from an earlier message or start a new canvas."
           : status === 400
             ? "The request could not be read."
-            : "Could not reach DeepSeek or read its response. Your prompt is saved; you can retry.";
+            : "Could not reach the provider or read its response. Your prompt is saved; you can retry.";
       res
         .status(status === 400 || status === 413 ? status : 502)
         .json({ error: { code, message } });

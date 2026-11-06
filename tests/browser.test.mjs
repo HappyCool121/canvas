@@ -126,8 +126,9 @@ async function savedCanvas(page) {
   return page.evaluate(async () => (await (await fetch("/api/workspace")).json()).canvases.sort((a, b) => a.createdAt - b.createdAt));
 }
 
-test("a DeepSeek key entered in the app lasts for the server session and never reaches browser storage", { timeout: 60_000 }, async () => {
+test("keys entered in the app last for the server session, several providers connect at once, and keys never reach browser storage", { timeout: 60_000 }, async () => {
   const sessionKey = "sk-synthetic-session-browser-key";
+  const openaiKey = "sk-synthetic-openai-browser-key";
   const { context, page, errors } = await newPage(browser, "/test/reset?key=none");
   try {
     await page.goto(origin);
@@ -135,22 +136,47 @@ test("a DeepSeek key entered in the app lasts for the server session and never r
     await prompt.fill("Hello before connecting");
     assert.equal(await page.getByRole("button", { name: "Send prompt" }).isDisabled(), true);
     await page.screenshot({ path: "output/playwright/provider-disconnected.png" });
-    await page.getByRole("button", { name: "Connect DeepSeek to send" }).click();
-    const dialog = page.getByRole("dialog", { name: "Connect DeepSeek." });
+    await page.getByRole("button", { name: "Connect a provider to send" }).click();
+    const dialog = page.getByRole("dialog", { name: "Connect a provider." });
+    await dialog.getByLabel("Provider", { exact: true }).selectOption("deepseek");
     await dialog.getByLabel("DeepSeek API key").fill("short");
     await dialog.getByRole("button", { name: "Connect DeepSeek" }).click();
     await dialog.getByRole("alert").filter({ hasText: "Enter a valid DeepSeek API key." }).waitFor();
     await dialog.getByLabel("DeepSeek API key").fill(sessionKey);
     await dialog.getByRole("button", { name: "Connect DeepSeek" }).click();
-    await dialog.getByText("DeepSeek is connected for this session.").waitFor();
+    const connectedList = dialog.getByRole("list", { name: "Connected providers" });
+    await connectedList.getByText("this session").waitFor();
     await page.screenshot({ path: "output/playwright/provider-connected.png" });
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "DeepSeek connected" }).waitFor();
+    await page.getByRole("button", { name: "Model: DeepSeek Flash" }).waitFor();
     await send(page, "Hello after connecting", 1);
 
     await page.reload();
     await page.getByRole("button", { name: "DeepSeek connected" }).waitFor();
+
+    // A second provider joins the first; its models get their own group.
+    await page.getByRole("button", { name: "DeepSeek connected" }).click();
+    await dialog.getByLabel("Provider", { exact: true }).selectOption("openai");
+    await dialog.getByLabel("OpenAI API key").fill(openaiKey);
+    await dialog.getByRole("button", { name: "Connect OpenAI" }).click();
+    await connectedList.getByText("OpenAI").waitFor();
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "2 providers connected" }).waitFor();
+    await page.getByRole("button", { name: "Model: DeepSeek Flash" }).click();
+    const menu = page.getByRole("menu", { name: "Choose a model" });
+    await menu.getByRole("group", { name: "OpenAI" }).getByRole("menuitemradio").first().waitFor();
+    assert.equal(await menu.getByRole("group", { name: "DeepSeek" }).getByRole("menuitemradio").count(), 2);
+    // A model the list doesn't show can be typed.
+    await menu.getByLabel("Search models").fill("custom-model-x");
+    await menu.getByRole("menuitem", { name: /custom-model-x.*with OpenAI/ }).click();
+    await page.getByRole("button", { name: "Model: custom-model-x" }).waitFor();
+    await send(page, "Ask another provider", 2);
+    await page.getByRole("complementary", { name: "Full message" }).getByText("Answered by custom-model-x.").waitFor();
+    const answer = (await savedCanvas(page))[0].messages.find((m) => m.role === "assistant" && m.model === "custom-model-x");
+    assert.equal(answer.provider, "openai");
+
     const stored = await page.evaluate(async () => {
       const values = [JSON.stringify({ ...localStorage }), JSON.stringify({ ...sessionStorage })];
       for (const { name } of await indexedDB.databases()) {
@@ -169,14 +195,19 @@ test("a DeepSeek key entered in the app lasts for the server session and never r
       }
       return values.join("");
     });
-    assert.ok(!stored.includes(sessionKey));
-    assert.ok(!JSON.stringify(await savedCanvas(page)).includes(sessionKey));
+    for (const k of [sessionKey, openaiKey]) {
+      assert.ok(!stored.includes(k));
+      assert.ok(!JSON.stringify(await savedCanvas(page)).includes(k));
+      assert.ok(!(await page.evaluate(async () => JSON.stringify(await (await fetch("/api/workspace")).json()))).includes(k));
+    }
 
-    await page.getByRole("button", { name: "DeepSeek connected" }).click();
-    await page.getByRole("button", { name: "Disconnect" }).click();
-    await page.getByRole("button", { name: "Replace key" }).waitFor({ state: "detached" });
-    await page.getByRole("button", { name: "Close DeepSeek settings" }).click();
-    await page.getByRole("button", { name: "Connect DeepSeek", exact: true }).waitFor();
+    await page.getByRole("button", { name: "2 providers connected" }).click();
+    for (const name of ["OpenAI", "DeepSeek"]) {
+      await connectedList.getByRole("listitem").filter({ hasText: name }).getByRole("button", { name: "Disconnect" }).click();
+      await connectedList.getByRole("listitem").filter({ hasText: name }).waitFor({ state: "detached" });
+    }
+    await page.getByRole("button", { name: "Close provider settings" }).click();
+    await page.getByRole("button", { name: "Connect a provider", exact: true }).waitFor();
     assert.deepEqual(errors, []);
   } finally {
     await context.close();
@@ -716,7 +747,7 @@ test(
       await page.locator(".composer-image img").waitFor();
       await page.getByRole("button", { name: "Model: DeepSeek Flash" }).click();
       await page.getByRole("menuitemradio", { name: /DeepSeek V4 Pro/ }).click();
-      await page.getByText("Switch to DeepSeek Flash to send images").waitFor();
+      await page.getByText("DeepSeek V4 Pro can’t see images. Choose a model that can.").waitFor();
       assert.equal(
         await page.getByRole("button", { name: "Send prompt" }).isDisabled(),
         true,
@@ -896,7 +927,7 @@ for (const engine of ["Chromium", "WebKit"]) {
         await page.getByRole("menuitemradio", { name: new RegExp(to) }).click();
       }
       await chooseModel("DeepSeek Flash", "DeepSeek V4 Pro");
-      await page.getByText("Switch to DeepSeek Flash to send PDF pages").waitFor();
+      await page.getByText("DeepSeek V4 Pro can’t see PDF pages. Choose a model that can.").waitFor();
       assert.equal(await submit.isDisabled(), true);
       await chooseModel("DeepSeek V4 Pro", "DeepSeek Flash");
       const request = page.waitForRequest((r) => r.url().endsWith("/api/chat"));
@@ -944,7 +975,13 @@ for (const engine of ["Chromium", "WebKit"]) {
       assert.deepEqual(await answers.evaluateAll((nodes) => nodes.map((node) => node.offsetWidth)), [520, 520]);
       assert.equal(await answers.first().locator(".bubble-preview").evaluate((preview) =>
         getComputedStyle(preview).maxHeight), "360px");
-      await usage.getByText("$0.001545 – $0.003091", { exact: true }).waitFor();
+      // Both answers are priced from the catalog: 5,320 + 250 tokens on Flash,
+      // then 150 uncached + 150 cached + 250 on V4 Pro.
+      const prices = JSON.parse(await readFile("shared/catalog.json", "utf8")).providers.deepseek;
+      const [, , , , , flashIn, flashOut] = prices["deepseek-flash"];
+      const [, , , , , proIn, proOut, proCached] = prices["deepseek-v4-pro"];
+      const cost = (5320 * flashIn + 250 * flashOut + 150 * proIn + 150 * proCached + 250 * proOut) / 1_000_000;
+      await usage.getByText(`≈ $${cost.toFixed(6)}`, { exact: true }).waitFor();
 
       await selectMessage(page, root);
       await panel.getByRole("button", { name: "Edit prompt" }).click();

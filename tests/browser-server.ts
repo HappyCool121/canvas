@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import express from "express";
 import { createApp } from "../server/app";
-import { deepseek } from "../server/provider";
+import type { EnvConnection } from "../server/config";
+import catalog from "../shared/catalog.json" with { type: "json" };
 
 const markdown = [
   "# A little room to explore",
@@ -39,9 +40,15 @@ const markdown = [
   '<img src=x onerror="window.__markdownExecuted = true">',
 ];
 const attempts = new Map<string, number>();
+// Model lists: DeepSeek's two models, and the first few of OpenAI's catalog.
+const listed: Record<string, string[]> = {
+  "api.deepseek.com": ["deepseek-flash", "deepseek-v4-pro"],
+  "api.openai.com": Object.keys(catalog.providers.openai).slice(0, 3),
+};
 const fetcher: typeof fetch = async (_url, init) => {
   if (String(_url).endsWith("/user/balance")) return Response.json({ is_available: true, balance_infos: [] });
   if (String(_url).endsWith("/files")) return Response.json({ id: `file-api-${crypto.randomUUID()}`, expires_at: Math.floor(Date.now()/1000)+86400 });
+  if (String(_url).endsWith("/models")) return Response.json({ data: (listed[new URL(String(_url)).host] ?? []).map((id) => ({ id })) });
   const body = JSON.parse(init?.body as string);
   const content = body.messages.at(-1).content as
     | string
@@ -98,10 +105,11 @@ const port = Number(process.env.PORT || 3317);
 if (!process.env.CANVAS_DATA_DIR) throw new Error("Browser tests require isolated temporary storage.");
 const app = express();
 let run = 0;
-// Fixtures start connected, as with DEEPSEEK_API_KEY in .env, unless reset with ?key=none.
+// Fixtures start connected to DeepSeek, as with DEEPSEEK_API_KEY in .env,
+// unless reset with ?key=none.
 const freshApp = (connected = true) => createApp({
-  provider: deepseek(fetcher),
-  apiKey: connected ? "sk-synthetic-browser-test" : undefined,
+  fetcher,
+  connections: connected ? [{ id: "deepseek", key: "sk-synthetic-browser-test", baseUrl: "https://api.deepseek.com" } satisfies EnvConnection] : [],
   dataDir: path.join(process.env.CANVAS_DATA_DIR!, `run-${++run}`),
 });
 let testApp = freshApp();

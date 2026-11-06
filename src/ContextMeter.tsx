@@ -15,7 +15,8 @@ export function ContextMeter({
   request,
 }: {
   tokens: number | null;
-  limit: number;
+  // The model's context window; unknown for some models.
+  limit?: number;
   request?: number;
 }) {
   const previousRequest = useRef(request);
@@ -25,7 +26,7 @@ export function ContextMeter({
     previousRequest.current = request;
     if (request !== undefined) setTurns((count) => count + 1);
   }, [request]);
-  const share = tokens ? Math.min(1, tokens / limit) : 0;
+  const share = tokens && limit ? Math.min(1, tokens / limit) : 0;
   return (
     <div
       className={`context-meter ${tokens === null ? "idle" : ""}`}
@@ -34,7 +35,7 @@ export function ContextMeter({
       aria-valuemin={0}
       aria-valuemax={limit}
       aria-valuenow={tokens ?? 0}
-      title="Tokens in the selected branch. Exact where DeepSeek reported usage, estimated otherwise."
+      title="Tokens in the selected branch. Exact where the provider reported usage, estimated otherwise."
     >
       <span className="meter-capsule" aria-hidden="true">
         <span className="meter-shell" style={{ transform: `rotate(${turns * 180}deg)` }} />
@@ -58,7 +59,7 @@ export function ContextMeter({
       <small>
         {tokens === null
           ? "—"
-          : `${formatTokens(tokens)} / ${formatTokens(limit)}`}
+          : limit ? `${formatTokens(tokens)} / ${formatTokens(limit)}` : formatTokens(tokens)}
       </small>
     </div>
   );

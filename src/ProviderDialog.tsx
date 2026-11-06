@@ -1,24 +1,36 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, Check, KeyRound, LoaderCircle, Sparkles, X } from "lucide-react";
+import { ArrowUpRight, KeyRound, LoaderCircle, Sparkles, X } from "lucide-react";
 import { api } from "./api";
-import type { ProviderStatus } from "../shared/types";
+import type { ProvidersState } from "../shared/types";
+import type { Preset } from "../shared/providers";
+
+const SOURCE = { env: "from .env", session: "this session", saved: "local, remembered" };
+const placeholder = (url: string) => /\{[^}]*\}/.test(url);
 
 export function ProviderDialog({
-  status,
+  state,
   onChange,
   onClose,
 }: {
-  status: ProviderStatus;
-  onChange: (s: ProviderStatus) => void;
+  state: ProvidersState;
+  onChange: (s: ProvidersState) => void;
   onClose: () => void;
 }) {
+  const connected = new Set(state.connected.map((c) => c.id));
+  const [presetId, setPresetId] = useState(
+    () => state.presets.find((p) => !connected.has(p.id))?.id ?? state.presets[0]?.id ?? "",
+  );
+  const preset = state.presets.find((p) => p.id === presetId);
+  const defaultBase = (p: Preset | undefined) =>
+    p ? state.savedBaseUrls[p.id] ?? (placeholder(p.baseUrl) ? "" : p.baseUrl) : "";
   const [key, setKey] = useState("");
+  const [baseUrl, setBaseUrl] = useState(() => defaultBase(preset));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => {
     input.current?.focus();
-  }, []);
+  }, [presetId]);
   useEffect(() => {
     // Capture first so Escape closes the dialog without deselecting the bubble
     // behind it, even after focus leaves the disabled input.
@@ -30,17 +42,21 @@ export function ProviderDialog({
     window.addEventListener("keydown", key, true);
     return () => window.removeEventListener("keydown", key, true);
   }, [busy, onClose]);
-  async function request(init: RequestInit) {
+  async function request(path: string, init: RequestInit) {
     setBusy(true);
     setError("");
     try {
-      onChange(await api<ProviderStatus>("/api/provider", init));
+      onChange(await api<ProvidersState>(path, init));
+      return true;
     } catch (error) {
       setError((error as Error).message);
+      return false;
     } finally {
       setBusy(false);
     }
   }
+  const showBaseUrl = Boolean(preset && (preset.editableBaseUrl || preset.baseUrlChoices));
+  const groups = [...new Set(state.presets.map((p) => p.group))];
   return (
     <div
       className="modal-backdrop"
@@ -56,7 +72,7 @@ export function ProviderDialog({
       >
         <button
           className="icon-button close-dialog"
-          aria-label="Close DeepSeek settings"
+          aria-label="Close provider settings"
           disabled={busy}
           onClick={onClose}
         >
@@ -65,37 +81,111 @@ export function ProviderDialog({
         <span className="dialog-icon">
           <KeyRound size={23} />
         </span>
-        <span className="eyebrow">YOUR MODEL, YOUR KEY</span>
-        <h2 id="provider-title">Connect DeepSeek.</h2>
-        <p>Bring a DeepSeek API key. DeepSeek bills your account directly for every answer.</p>
+        <span className="eyebrow">YOUR MODELS, YOUR KEYS</span>
+        <h2 id="provider-title">Connect a provider.</h2>
+        <p>Bring an API key from any provider below, or point Canvas at a local or OpenAI-compatible server. Each provider bills your own account.</p>
+        {state.connected.length > 0 && (
+          <ul className="connected-providers" aria-label="Connected providers">
+            {state.connected.map((c) => (
+              <li key={c.id}>
+                <span className="status-dot online" />
+                <span>
+                  <strong>{state.presets.find((p) => p.id === c.id)?.name ?? c.id}</strong>
+                  <small>{SOURCE[c.source]}</small>
+                </span>
+                <button
+                  type="button"
+                  className="disconnect"
+                  disabled={busy}
+                  onClick={() => void request(`/api/providers/${c.id}`, { method: "DELETE" })}
+                >
+                  Disconnect
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <form
-          onSubmit={(e) => {
+          onSubmit={async (e) => {
             e.preventDefault();
-            if (busy) return;
+            if (busy || !preset) return;
             const enteredKey = key.trim();
             setKey("");
-            void request({ method: "POST", body: JSON.stringify({ key: enteredKey }) });
+            await request(`/api/providers/${preset.id}`, {
+              method: "POST",
+              body: JSON.stringify({ ...(enteredKey ? { key: enteredKey } : {}), ...(showBaseUrl ? { baseUrl: baseUrl.trim() } : {}) }),
+            });
           }}
         >
-          <label htmlFor="api-key">
-            DeepSeek API key{" "}
-            <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">
-              Get a key <ArrowUpRight size={12} />
-            </a>
-          </label>
-          <input
-            ref={input}
-            id="api-key"
-            type="password"
-            autoComplete="off"
-            spellCheck={false}
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder="sk-…"
+          <label htmlFor="provider-select">Provider</label>
+          <select
+            id="provider-select"
+            value={presetId}
             disabled={busy}
-          />
+            onChange={(e) => {
+              const next = state.presets.find((p) => p.id === e.target.value);
+              setPresetId(e.target.value);
+              setKey("");
+              setBaseUrl(defaultBase(next));
+              setError("");
+            }}
+          >
+            {groups.map((group) => (
+              <optgroup key={group} label={group}>
+                {state.presets.filter((p) => p.group === group).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}{connected.has(p.id) ? " (connected)" : ""}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          {preset && (
+            <>
+              <label htmlFor="api-key">
+                {preset.name} API key{preset.keyless ? " (optional)" : ""}
+                {preset.keyUrl && (
+                  <a href={preset.keyUrl} target="_blank" rel="noreferrer">
+                    Get a key <ArrowUpRight size={12} />
+                  </a>
+                )}
+              </label>
+              <input
+                ref={input}
+                id="api-key"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                placeholder={preset.keyless ? "Not needed for a local server" : "Paste your key"}
+                disabled={busy}
+              />
+              {showBaseUrl && (
+                <>
+                  <label htmlFor="base-url">Base URL</label>
+                  <input
+                    id="base-url"
+                    type="url"
+                    autoComplete="off"
+                    spellCheck={false}
+                    list={preset.baseUrlChoices ? "base-url-choices" : undefined}
+                    value={baseUrl}
+                    onChange={(e) => setBaseUrl(e.target.value)}
+                    placeholder={preset.baseUrl || "https://your-server.example/v1"}
+                    disabled={busy}
+                  />
+                  {preset.baseUrlChoices && (
+                    <datalist id="base-url-choices">
+                      {preset.baseUrlChoices.map((url) => <option key={url} value={url} />)}
+                    </datalist>
+                  )}
+                </>
+              )}
+            </>
+          )}
           <p className="key-note">
-            <KeyRound size={12} /> Your key stays in local server memory. It is never saved in your
+            <KeyRound size={12} /> Keys stay in local server memory. They are never saved in your
             browser or written to disk.
           </p>
           {error && (
@@ -103,28 +193,17 @@ export function ProviderDialog({
               {error}
             </p>
           )}
-          {status.connected && (
-            <div className="connected-note" role="status">
-              <Check size={14} />
-              {status.source === "env"
-                ? "Connected with DEEPSEEK_API_KEY from .env."
-                : "DeepSeek is connected for this session."}
-            </div>
-          )}
-          <button className="primary connect-button" disabled={busy || !key.trim()}>
+          <button
+            className="primary connect-button"
+            disabled={busy || !preset || (!preset.keyless && !key.trim()) || (showBaseUrl && !baseUrl.trim())}
+          >
             {busy ? <LoaderCircle size={15} className="spin" /> : <Sparkles size={15} />}
-            {busy ? "Checking your key…" : status.connected ? "Replace key" : "Connect DeepSeek"}
+            {busy ? "Checking…" : preset && connected.has(preset.id) ? `Replace ${preset.name} connection` : `Connect ${preset?.name ?? "provider"}`}
           </button>
         </form>
-        {status.connected && (
-          <button className="disconnect" disabled={busy} onClick={() => void request({ method: "DELETE" })}>
-            Disconnect
-          </button>
-        )}
         <p className="dialog-footnote">
-          {status.source === "env"
-            ? "Disconnecting lasts until Canvas restarts, which reconnects the .env key."
-            : "Restarting Canvas clears this key. Disconnect clears it now and stops answers in progress."}
+          Restarting Canvas clears keys entered here; keys from .env reconnect.
+          Disconnect clears a key now and stops its answers in progress.
         </p>
       </section>
     </div>

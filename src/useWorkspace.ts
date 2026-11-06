@@ -9,7 +9,7 @@ import {
   withoutImages,
   ancestorPath,
 } from "../shared/graph";
-import { DEFAULT_MODEL, MODELS } from "../shared/models";
+import { LEGACY_MODEL, LEGACY_PROVIDER, type ModelInfo } from "../shared/models";
 import type {
   Canvas,
   ChatMessage,
@@ -27,7 +27,10 @@ import {
   prepareImage,
 } from "./images";
 
-export function useWorkspace() {
+// `models` lists the connected providers' models; it decides which answers may see images.
+export function useWorkspace(models: ModelInfo[]) {
+  const modelList = useRef(models);
+  modelList.current = models;
   const [canvases, setCanvases] = useState<Canvas[]>([]);
   const [activeId, setActiveId] = useState<string>("");
   const [preferences, setPreferences] = useState<Record<string, string>>({});
@@ -188,14 +191,15 @@ export function useWorkspace() {
     controllers.current.set(canvasId, controller);
     try {
       const canvas = data.current.find((c) => c.id === canvasId)!;
-      const requested = canvas.messages.find((m) => m.id === answerId)?.model;
-      // Answers from before model choice, or with an unknown model, use the default.
-      const model =
-        MODELS.find((m) => m.id === requested) ??
-        MODELS.find((m) => m.id === DEFAULT_MODEL)!;
+      const answer = canvas.messages.find((m) => m.id === answerId);
+      // Answers from before model choice were written by DeepSeek Flash.
+      const provider = answer?.provider ?? LEGACY_PROVIDER;
+      const model = answer?.model ?? LEGACY_MODEL;
+      // Models the catalog doesn't describe may see images; the provider decides.
+      const vision = modelList.current.find((m) => m.provider === provider && m.id === model)?.vision ?? true;
       const history = requestHistory(canvas, answerId);
       const messages: ChatMessage[] = await Promise.all(
-        (model.vision ? history : withoutImages(history)).map(
+        (vision ? history : withoutImages(history)).map(
           async ({ images, ...m }) =>
             images ? { ...m, attachmentIds: images.map(image => image.id) } : m,
         ),
@@ -208,7 +212,8 @@ export function useWorkspace() {
         body: JSON.stringify({
           canvasId,
           requestId: answerId,
-          model: model.id,
+          provider,
+          model,
           messages,
         }),
       });
@@ -246,7 +251,7 @@ export function useWorkspace() {
     canvasId: string,
     text: string,
     parentId: string | null,
-    model: string,
+    model: ModelInfo,
     onTurn: (ids: string[], first: boolean) => void,
     geometry?: Record<string, import("../shared/graph").PlacementRect>,
   ) {
@@ -255,12 +260,13 @@ export function useWorkspace() {
     setNotice("");
     try {
       const current = data.current.find((c) => c.id === canvasId)!;
-      if (current.draftImages?.length && !MODELS.find((m) => m.id === model)?.vision)
-        throw new Error("Switch to DeepSeek Flash to send images or document pages.");
+      if (current.draftImages?.length && !model.vision)
+        throw new Error(`${model.label} can’t see images or document pages. Choose a model that can.`);
       const turn = addTurn(current, text, parentId, {
         images: current.draftImages,
         editOf: current.editingId ?? undefined,
-        model,
+        model: model.id,
+        provider: model.provider,
         geometry,
       });
       const saved = commit(turn.canvas);
@@ -391,7 +397,7 @@ export function useWorkspace() {
     const current = data.current.find((c) => c.id === canvasId);
     if (!current) return;
     if (!vision) {
-      setNotice("Switch to DeepSeek Flash to attach images or document pages.");
+      setNotice("Choose a model that sees images to attach images or document pages.");
       return;
     }
     const docxMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";

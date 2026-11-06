@@ -179,7 +179,7 @@ export function addTurn(
   canvas: Canvas,
   text: string,
   parentId: string | null,
-  options: { images?: ImageRef[]; editOf?: string; model?: string; geometry?: Record<string, PlacementRect> } = {},
+  options: { images?: ImageRef[]; editOf?: string; model?: string; provider?: string; geometry?: Record<string, PlacementRect> } = {},
 ) {
   const images = options.images?.length ? options.images : undefined;
   if (!text.trim() && !images) throw new Error("Write a prompt first.");
@@ -232,6 +232,7 @@ export function addTurn(
     status: "pending",
     placementOffset: { x: answerPosition.x-position.x, y: answerPosition.y-position.y },
     layoutOffset: { x: 0, y: answerPosition.y-position.y },
+    ...(options.provider ? { provider: options.provider } : {}),
     ...(options.model ? { model: options.model } : {}),
   };
   return {

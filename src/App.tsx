@@ -14,8 +14,8 @@ import { ContextMeter } from "./ContextMeter";
 import { ProviderDialog } from "./ProviderDialog";
 import { api } from "./api";
 import { ancestorPath, contextTokens, visualParent } from "../shared/graph";
-import { DEFAULT_MODEL, MODELS } from "../shared/models";
-import type { Canvas, Message, ProviderStatus } from "../shared/types";
+import { modelKey, parseModelKey, unknownModel, type ModelInfo } from "../shared/models";
+import type { Canvas, Message, ProvidersState } from "../shared/types";
 
 const SIDEBAR_KEY = "canvas.sidebar";
 const MODEL_KEY = "canvas.model";
@@ -51,20 +51,29 @@ function branchImageCount(canvas: Canvas) {
   }
 }
 
+const NO_MODEL: ModelInfo = { provider: "", providerName: "", id: "", label: "Choose a model", description: "", vision: true };
+
 export default function App() {
-  const workspace = useWorkspace();
+  const [providers, setProviders] = useState<ProvidersState>({ presets: [], connected: [], savedBaseUrls: {} });
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const workspace = useWorkspace(models);
   const { active: canvas } = workspace;
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => stored(SIDEBAR_KEY) === "collapsed" ||
       (stored(SIDEBAR_KEY) === null && matchMedia("(max-width: 700px)").matches),
   );
-  const [modelId, setModelId] = useState(
-    () => stored(MODEL_KEY) ?? DEFAULT_MODEL,
-  );
-  const model = MODELS.find((m) => m.id === modelId) ?? MODELS[0];
+  // "provider/model"; an older plain model id means DeepSeek.
+  const [modelChoice, setModelChoice] = useState(() => stored(MODEL_KEY));
+  const connectedIds = new Set(providers.connected.map((c) => c.id));
+  const choice = parseModelKey(modelChoice);
+  const providerName = (id: string) => providers.presets.find((p) => p.id === id)?.name ?? id;
+  // The chosen model, else the first model of a connected provider.
+  const model =
+    (choice && models.find((m) => m.provider === choice.provider && m.id === choice.id)) ??
+    (choice && connectedIds.has(choice.provider) ? unknownModel(choice.provider, providerName(choice.provider), choice.id) : undefined) ??
+    models[0] ?? NO_MODEL;
   const [camera, setCamera] = useState<CameraRequest>();
   const [lastRead, setLastRead] = useState<{ canvasId: string; message: Message }>();
-  const [provider, setProvider] = useState<ProviderStatus>({ connected: false, source: null });
   const [providerOpen, setProviderOpen] = useState(false);
   const geometry = useRef<Record<string, import("../shared/graph").PlacementRect>>({});
   const stage = useRef<HTMLDivElement>(null);
@@ -74,14 +83,14 @@ export default function App() {
     if (workspace.loading) return;
     const prefs = workspace.preferences;
     if (prefs[SIDEBAR_KEY]) setSidebarCollapsed(prefs[SIDEBAR_KEY] === "collapsed");
-    if (prefs[MODEL_KEY]) setModelId(prefs[MODEL_KEY]);
+    if (prefs[MODEL_KEY]) setModelChoice(prefs[MODEL_KEY]);
   }, [workspace.loading]);
   useEffect(() => {
     store(SIDEBAR_KEY, sidebarCollapsed ? "collapsed" : "open");
   }, [sidebarCollapsed]);
   useEffect(() => {
-    store(MODEL_KEY, modelId);
-  }, [modelId]);
+    if (modelChoice) store(MODEL_KEY, modelChoice);
+  }, [modelChoice]);
   // Selecting a bubble opens the composer for a follow-up from it.
   useEffect(() => {
     if (canvas?.selectedId) composer.current?.focus({ preventScroll: true });
@@ -100,11 +109,17 @@ export default function App() {
     return () => window.removeEventListener("keydown", listener);
   }, [canvas?.id, canvas?.selectedId, canvas?.editingId, workspace.pageSelection]);
 
-  // The key lives in server memory, so recheck when a restart may have cleared it.
+  // Keys live in server memory, so recheck when a restart may have cleared them.
   const generatingAny = workspace.canvases.some((c) => c.messages.some((m) => m.status === "pending"));
+  const refreshModels = () =>
+    void api<{ models: ModelInfo[] }>("/api/models").then(({ models }) => setModels(models), () => {});
+  const updateProviders = (state: ProvidersState) => {
+    setProviders(state);
+    refreshModels();
+  };
   useEffect(() => {
     const refresh = () =>
-      void api<ProviderStatus>("/api/provider").then(setProvider, () => {});
+      void api<ProvidersState>("/api/providers").then(updateProviders, () => {});
     refresh();
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
@@ -201,7 +216,7 @@ export default function App() {
           saveState={workspace.saveState}
           preferenceError={workspace.preferenceError}
           onRetrySave={() => void workspace.retrySave()}
-          connected={provider.connected}
+          connected={providers.connected.map((c) => providerName(c.id))}
           onProvider={() => setProviderOpen(true)}
         />
         <ReactFlowProvider key={canvas.id}>
@@ -291,9 +306,10 @@ export default function App() {
                   parent={parent}
                   generating={generating}
                   notice={workspace.notice}
-                  models={MODELS}
+                  models={models}
                   model={model}
-                  connected={provider.connected}
+                  providers={providers.connected.map((c) => ({ id: c.id, name: providerName(c.id) }))}
+                  connected={connectedIds.has(model.provider)}
                   onConnect={() => setProviderOpen(true)}
                   branchImages={branchImageCount(canvas)}
                   branchBytes={ancestorPath(canvas, canvas.editingId ? canvas.messages.find(m => m.id === canvas.editingId)?.parentId ?? null : canvas.draftParentId).flatMap(m => m.images ?? []).reduce((sum, image) => sum + (image.bytes ?? 0), 0)}
@@ -306,7 +322,7 @@ export default function App() {
                       canvas.id,
                       canvas.draft,
                       canvas.draftParentId,
-                      model.id,
+                      model,
                       (ids, first) => setCamera({ ids: first ? [ids[1]] : ids, first, center: true, followId: ids[1] }),
                       geometry.current,
                     );
@@ -326,7 +342,7 @@ export default function App() {
                   }
                   onCancelEdit={() => workspace.cancelEdit(canvas.id)}
                   onDismissNotice={workspace.dismissNotice}
-                  onModel={(id) => { setModelId(id); workspace.setPreference(MODEL_KEY, id); }}
+                  onModel={(m) => { const key = modelKey(m.provider, m.id); setModelChoice(key); workspace.setPreference(MODEL_KEY, key); }}
                 />
               )}
               {selected && !readerOpen && <button className="reader-reopen icon-button" aria-label="Open reading panel" aria-controls="reading-panel" aria-expanded={false} onClick={() => void workspace.update(canvas.id, c => ({ ...c, readingPanelOpen: true }))}><ChevronLeft size={18} /></button>}
@@ -355,8 +371,8 @@ export default function App() {
         )}
         {providerOpen && (
           <ProviderDialog
-            status={provider}
-            onChange={setProvider}
+            state={providers}
+            onChange={updateProviders}
             onClose={() => {
               setProviderOpen(false);
               composer.current?.focus({ preventScroll: true });

@@ -35,7 +35,8 @@ export function Sidebar({
   saveState?: { saving: boolean; error?: string };
   preferenceError: string;
   onRetrySave: () => void;
-  connected: boolean;
+  // Names of the connected providers.
+  connected: string[];
   onProvider: () => void;
 }) {
   const [exporting, setExporting] = useState(false);
@@ -102,8 +103,8 @@ export function Sidebar({
             <dt>Tokens used</dt>
             <dd>{usage.tokens.toLocaleString()}{usage.missingUsage && " (partial)"}</dd>
             <dt>Estimated cost (USD)</dt>
-            <dd title="Off-peak to peak at current DeepSeek rates">
-              {usd(usage.offPeak)} – {usd(usage.peak)}{usage.partial && " (partial)"}
+            <dd title="At list prices from the models.dev catalog, or as the provider reported. DeepSeek charges more at peak hours.">
+              ≈ {usd(usage.cost)}{usage.partial && " (partial)"}
             </dd>
           </dl>
           <button className="export-canvas" disabled={exporting} onClick={async () => {
@@ -135,8 +136,12 @@ export function Sidebar({
           </div>
           <div className="sidebar-footer">
             <button className="provider-button" onClick={onProvider} aria-haspopup="dialog">
-              <span className={`status-dot ${connected ? "online" : ""}`} />
-              {connected ? "DeepSeek connected" : "Connect DeepSeek"}
+              <span className={`status-dot ${connected.length ? "online" : ""}`} />
+              {connected.length === 1
+                ? `${connected[0]} connected`
+                : connected.length
+                  ? `${connected.length} providers connected`
+                  : "Connect a provider"}
             </button>
             <span>v0.4</span>
           </div>

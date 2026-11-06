@@ -106,7 +106,7 @@ test("failed writes reject, keep acknowledged snapshots and allow the queue to r
 
 test("workspace APIs retain Host/Origin guards, store binary bytes and reject traversal", async (t) => {
   const dir = await temporary(t);
-  const server = createServer(createApp({ apiKey: "synthetic", dataDir: dir }));
+  const server = createServer(createApp({ connections: [{ id: "deepseek", key: "synthetic", baseUrl: "https://api.deepseek.com" }], dataDir: dir }));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise<void>((r) => server.close(() => r())); });
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

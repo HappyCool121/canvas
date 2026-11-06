@@ -89,6 +89,7 @@ export function createWorkspace(directory = process.env.CANVAS_DATA_DIR || defau
       return { canvases, activeId: prefs.activeId, preferences: prefs.values || {} };
     }),
     save: (c: Canvas) => { const snapshot = structuredClone(c); return serial(() => save(snapshot)); },
+    preferences: () => serial(async () => (await preferences()).values || {}),
     setPreferences: (patch: { activeId?: string; values?: Record<string, string> }, importOnly = false) => serial(async () => {
       if (patch.activeId !== undefined && !validId(patch.activeId)) throw new Error("Invalid active canvas.");
       const prefs = await preferences();
