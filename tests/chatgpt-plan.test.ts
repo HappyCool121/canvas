@@ -232,26 +232,44 @@ test("uses each answer’s exact account across switches and aborts only that ac
 
 test("requires a completed stream, classifies plan failures, and sends branched inline images", async t => {
   const secret = "mock-access-credential-do-not-expose";
+  const warn = t.mock.method(console, "warn", () => {});
   const fixture = planFixture({ generate: (_account, body) => {
     switch (body.input.at(-1).content) {
-      case "interrupted": return events({ type: "response.output_text.delta", delta: "Partial text" });
-      case "incomplete": return events({ type: "response.incomplete", response: { status: "incomplete" } });
+      case "interrupted": return new Response(events({ type: "response.output_text.delta", delta: "Partial text" }).body);
+      case "incomplete": return events({ type: "response.incomplete", response: { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } } });
+      case "rejected": return Response.json({ error: { code: "invalid_value", param: "input[0].content", message: secret } },
+        { status: 400, headers: { "x-oai-request-id": "req-test" } });
       case "limit": return events({ type: "response.failed", response: { error: { code: "subscription_sharing_usage_limit_exceeded", message: secret } } });
       case "temporary": return events({ type: "response.failed", response: { error: { code: "subscription_sharing_usage_unavailable", message: secret } } });
       default:
         assert.deepEqual(body.input.slice(0, 2), [{ role: "user", content: "Parent" }, { role: "assistant", content: "Prior answer" }]);
         assert.equal(body.input.at(-1).content[1].image_url, image);
-        return events(completed("Image received ✓"));
+        // The live plan endpoint returned SSE without a Content-Type header.
+        return new Response(events(completed("Image received ✓")).body);
     }
   } });
   const app = await local(t, fixture);
   const a = await app.signIn("a");
-  for (const [content, expected] of [["interrupted", "stream"], ["incomplete", "stream"], ["limit", "limit"], ["temporary", "temporary"]]) {
+  for (const [content, expected] of [["interrupted", "stream"], ["incomplete", "incomplete"], ["rejected", "request"], ["limit", "limit"], ["temporary", "temporary"]]) {
     const response = await app.chat(a, "canvas", "gpt-6.1-sol", [{ role: "user", content }]);
     const result = await response.json();
     assert.equal(result.error.code, `chatgpt_plan_${expected}`);
     assert.doesNotMatch(JSON.stringify(result), /Partial text|mock-access/);
   }
+  const diagnostics = warn.mock.calls.map(call => call.arguments[1]);
+  assert.equal(diagnostics.length, 5);
+  assert.deepEqual(diagnostics.map(({ stage, event, code }) => [stage, event, code]), [
+    ["stream", undefined, undefined],
+    ["event", "response.incomplete", undefined],
+    ["http", undefined, "invalid_value"],
+    ["event", "response.failed", "subscription_sharing_usage_limit_exceeded"],
+    ["event", "response.failed", "subscription_sharing_usage_unavailable"],
+  ]);
+  assert.equal(diagnostics[1].reason, "max_output_tokens");
+  assert.equal(diagnostics[2].status, 400);
+  assert.equal(diagnostics[2].requestId, "req-test");
+  assert.equal(diagnostics[2].param, "input[0].content");
+  assert.doesNotMatch(JSON.stringify(diagnostics), /Partial text|mock-access/);
   const branch = [{ role: "user", content: "Parent" }, { role: "assistant", content: "Prior answer" }, { role: "user", content: "Child", images: [image] }];
   assert.equal((await (await app.chat(a, "canvas", "unknown-a", branch)).json()).error.code, "image_unsupported");
   const result = await (await app.chat(a, "canvas", "gpt-6.1-sol", branch)).json();

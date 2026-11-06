@@ -2268,7 +2268,7 @@ test("ChatGPT plan and API keys coexist, and plan retries stay on their saved ac
     await page.getByRole("textbox", { name: "Your prompt" }).fill("plan-retry-first");
     await page.getByRole("button", { name: "Send prompt" }).click();
     const failed = page.locator('[data-role="assistant"][data-status="error"]');
-    await failed.getByText("ChatGPT did not finish this answer.", { exact: false }).waitFor();
+    await failed.getByText("ChatGPT stopped before completing this answer.", { exact: false }).waitFor();
 
     await page.locator(".provider-button").click();
     nextAccount = "b";
@@ -2280,7 +2280,10 @@ test("ChatGPT plan and API keys coexist, and plan retries stay on their saved ac
     await failed.getByRole("button", { name: "Retry answer" }).click();
     await page.locator('[data-role="assistant"][data-status="complete"]').getByText("Answer billed to a").waitFor();
     const [saved] = await savedCanvas(page);
-    assert.equal(saved.messages.find(message => message.role === "assistant").profileId, accountA);
+    const retriedAnswer = saved.messages.find(message => message.role === "assistant");
+    assert.equal(retriedAnswer.profileId, accountA);
+    assert.equal(retriedAnswer.model, "gpt-6.1-sol");
+    assert.equal(retriedAnswer.status, "complete");
 
     // Switching the active account changes new requests, while an existing
     // failed answer retains its account until the user chooses another route.

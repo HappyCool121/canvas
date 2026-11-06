@@ -20,7 +20,31 @@ export const consent = () => new ApiError(403, "chatgpt_plan_consent", "Enable C
 export const modelUnavailable = () => new ApiError(404, "chatgpt_plan_model", "This ChatGPT account no longer lists that model. Choose an available model before changing this answer’s route.");
 const badSignIn = () => new ApiError(502, "chatgpt_plan_sign_in", "Canvas could not verify the ChatGPT sign-in. Start a new sign-in and try again.");
 const invalidStream = () => new ApiError(502, "chatgpt_plan_stream", "ChatGPT did not finish this answer. Your prompt is saved. Retry when you’re ready.");
+const incompleteAnswer = () => new ApiError(502, "chatgpt_plan_incomplete", "ChatGPT stopped before completing this answer. Your prompt is saved and you can retry.");
 const refreshErrors = new Set(["invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused"]);
+
+type ErrorFields = { code?: unknown; param?: unknown };
+type PlanRequest = { path: "/models" | "/responses"; model?: string };
+type TerminalEvent = "response.completed" | "response.failed" | "response.incomplete" | "error";
+
+function diagnosticValue(value: unknown) {
+  return typeof value === "string" && /^[a-zA-Z0-9_.\[\]-]{1,128}$/.test(value) ? value : undefined;
+}
+
+function reportFailure(request: PlanRequest, stage: "transport" | "http" | "stream" | "event",
+  response?: Response, details?: ErrorFields & { event?: TerminalEvent; reason?: unknown; shape?: string }) {
+  console.warn("ChatGPT plan request failed", {
+    ...request,
+    stage,
+    status: response?.status,
+    requestId: diagnosticValue(response?.headers.get("x-request-id")) ?? diagnosticValue(response?.headers.get("x-oai-request-id")),
+    code: diagnosticValue(details?.code),
+    param: diagnosticValue(details?.param),
+    event: details?.event,
+    reason: diagnosticValue(details?.reason),
+    shape: details?.shape,
+  });
+}
 
 export function authorizationUrl(params: {
   clientId: string; hostId: string; redirectUri: string; state: string; nonce: string;
@@ -68,7 +92,8 @@ function planError(status: number, code: unknown) {
   if (status === 404 || code === "model_not_found") return modelUnavailable();
   if (status === 429) return new ApiError(429, "chatgpt_plan_limit", "ChatGPT plan usage is limited. Review usage in ChatGPT settings before retrying.");
   if (status >= 500) return temporary();
-  return invalidStream();
+  if (status >= 400) return new ApiError(status, "chatgpt_plan_request", "ChatGPT rejected this request. Your prompt is saved.");
+  return new ApiError(502, "chatgpt_plan_failed", "ChatGPT returned an error while answering. Your prompt is saved and you can retry.");
 }
 
 function parseTokens(data: Record<string, unknown>, previous?: PlanTokens): PlanTokens {
@@ -96,21 +121,31 @@ function inputMessage({ role, content, images }: ChatMessage) {
 type ResponseEvent = {
   type?: string;
   code?: string;
+  param?: string;
   delta?: string;
   response?: {
     status?: string;
-    error?: { code?: string };
+    error?: ErrorFields;
+    incomplete_details?: { reason?: string };
     output?: { type: string; content?: { type: string; text?: string; refusal?: string }[] }[];
     usage?: { input_tokens?: number; output_tokens?: number };
   };
 };
 
-async function streamCompletion(response: Response, model: string): Promise<Completion> {
-  if (!response.body || !response.headers.get("content-type")?.startsWith("text/event-stream")) throw invalidStream();
+async function streamCompletion(response: Response, model: string, signal: AbortSignal): Promise<Completion> {
+  const request = { path: "/responses", model } as const;
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  // ChatGPT plan can send valid SSE without a Content-Type header.
+  if (!response.body || (contentType !== undefined && contentType !== "text/event-stream")) {
+    reportFailure(request, "stream", response);
+    void response.body?.cancel().catch(() => {});
+    throw invalidStream();
+  }
   const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = "";
   let data: string[] = [];
   const deltas: string[] = [];
+  let terminal: (ErrorFields & { event: TerminalEvent; reason?: string }) | undefined;
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -128,12 +163,18 @@ async function streamCompletion(response: Response, model: string): Promise<Comp
         try { event = JSON.parse(data.join("\n")); } catch { throw invalidStream(); }
         data = [];
         if (event?.type === "response.failed" || event?.type === "error") {
-          throw planError(0, event.response?.error?.code ?? event.code);
+          const { code, param } = event.response?.error ?? {};
+          terminal = { event: event.type, code: code ?? event.code, param: param ?? event.param };
+          throw planError(0, terminal.code);
         }
-        if (event?.type === "response.incomplete") throw invalidStream();
+        if (event?.type === "response.incomplete") {
+          terminal = { event: event.type, reason: event.response?.incomplete_details?.reason };
+          throw incompleteAnswer();
+        }
         if ((event?.type === "response.output_text.delta" || event?.type === "response.refusal.delta") &&
           typeof event.delta === "string") deltas.push(event.delta);
         if (event?.type !== "response.completed") continue;
+        terminal = { event: event.type };
         const result = event.response;
         if (!result || result.status !== "completed") throw invalidStream();
         const content = result.output?.filter(item => item.type === "message")
@@ -150,6 +191,7 @@ async function streamCompletion(response: Response, model: string): Promise<Comp
       buffer = buffer.slice(offset);
     }
   } catch (error) {
+    if (!signal.aborted) reportFailure(request, terminal ? "event" : "stream", response, terminal);
     if (error instanceof ApiError) throw error;
     throw invalidStream();
   } finally {
@@ -177,13 +219,19 @@ export function createPlanProtocol(fetcher: typeof fetch) {
       throw new ApiError(400, "chatgpt_plan_code", "ChatGPT could not exchange this sign-in code. Continue with ChatGPT to start again.");
     throw badSignIn();
   }
-  async function resource(path: string, accessToken: string, signal: AbortSignal, body?: string) {
-    const response = await call(RESOURCE + path, {
+  async function resource(request: PlanRequest, accessToken: string, signal: AbortSignal, body?: string) {
+    const response = await call(RESOURCE + request.path, {
       signal, method: body ? "POST" : "GET", body,
       headers: { Authorization: `Bearer ${accessToken}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+    }).catch(error => {
+      if (!signal.aborted) reportFailure(request, "transport");
+      throw error;
     });
     if (!response.ok) {
       const data = await response.json().catch(() => null);
+      const shape = data?.error && typeof data.error === "object" ? "error"
+        : typeof data?.detail === "string" ? "detail" : "other";
+      reportFailure(request, "http", response, { code: data?.error?.code, param: data?.error?.param, shape });
       throw planError(response.status, data?.error?.code);
     }
     return response;
@@ -235,7 +283,7 @@ export function createPlanProtocol(fetcher: typeof fetch) {
       return false;
     },
     async models(accessToken: string, profileId: string, signal: AbortSignal) {
-      const response = await resource("/models", accessToken, signal);
+      const response = await resource({ path: "/models" }, accessToken, signal);
       const data = await response.json().catch(() => null);
       if (!Array.isArray(data?.models)) throw temporary();
       const models = new Map<string, ModelInfo>();
@@ -250,7 +298,7 @@ export function createPlanProtocol(fetcher: typeof fetch) {
       const body = JSON.stringify({ model, instructions: SYSTEM_PROMPT, input: messages.map(inputMessage), store: false, stream: true });
       if (Buffer.byteLength(body) > MAX_REQUEST_BYTES)
         throw new ApiError(413, "request_too_large", "This conversation exceeds Canvas’s request limit. Branch from an earlier message or attach fewer images.");
-      return streamCompletion(await resource("/responses", accessToken, signal, body), model);
+      return streamCompletion(await resource({ path: "/responses", model }, accessToken, signal, body), model, signal);
     },
   };
 }
