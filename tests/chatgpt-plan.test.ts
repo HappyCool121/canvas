@@ -317,3 +317,18 @@ test("cancels a request waiting on refresh and revokes the replacement token", a
   assert.equal((await disconnected).status, 200);
   assert.deepEqual(revocations, [refresh("rotated")]);
 });
+
+test("offers the plan's thinking levels and sends the chosen one", async t => {
+  let sent: unknown;
+  const fixture = planFixture({ generate: (_account, body) => { sent = body.reasoning; return events(completed("Thought it through")); } });
+  const app = await local(t, fixture);
+  const a = await app.signIn("a");
+  const { models } = await (await app.api("/api/models")).json();
+  const sol = models.find((m: { id: string }) => m.id === "gpt-6.1-sol");
+  assert.deepEqual([sol.efforts, sol.defaultEffort], [["low", "medium", "high", "xhigh"], "medium"], "listed levels, without unknown ones");
+  const response = await app.api("/api/chat", { canvasId: "canvas", requestId: "answer", provider: "chatgpt-plan", model: "gpt-6.1-sol", profileId: a, reasoning: "xhigh", messages: [{ role: "user", content: "Think" }] });
+  assert.equal(response.status, 200);
+  assert.deepEqual(sent, { effort: "xhigh" });
+  await app.api("/api/chat", { canvasId: "canvas", requestId: "answer-2", provider: "chatgpt-plan", model: "gpt-6.1-sol", profileId: a, messages: [{ role: "user", content: "Default" }] });
+  assert.equal(sent, undefined, "Default sends no reasoning field");
+});

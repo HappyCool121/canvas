@@ -124,3 +124,36 @@ test("workspace APIs retain Host/Origin guards, store binary bytes and reject tr
   assert.equal((await fetch(origin + "/api/workspace/attachments/%2e%2e%2fsecret")).status, 400);
   assert.equal((await (await fetch(origin + "/api/workspace")).json()).canvases[0].id, canvas.id);
 });
+
+test("removing a canvas deletes its file and forgets it as the active canvas", async (t) => {
+  const dir = await temporary(t);
+  const store = createWorkspace(dir);
+  const keep = addTurn(newCanvas(), "Keep", null).canvas;
+  const drop = addTurn(newCanvas(), "Drop", null).canvas;
+  await store.save(keep);
+  await store.save(drop);
+  await store.setPreferences({ activeId: drop.id });
+  await store.remove(drop.id);
+  const result = await store.load();
+  assert.deepEqual(result.canvases.map((c) => c.id), [keep.id]);
+  assert.equal(result.activeId, undefined);
+  await store.remove(drop.id);
+  await assert.rejects(store.remove("../escape"), /Invalid workspace identifier/);
+});
+
+test("text files are attachments: saves need their bytes, and imports remap them", async (t) => {
+  const dir = await temporary(t);
+  const store = createWorkspace(dir);
+  const canvas = addTurn(newCanvas(), "Read this", null, { files: [{ id: "code-1", name: "a.ts", bytes: 3, lines: 1 }] }).canvas;
+  await assert.rejects(store.save(canvas), /attachment is missing/);
+  await store.putAttachment("code-1", new TextEncoder().encode("x=1"), "text/plain;charset=utf-8");
+  await store.save(canvas);
+  const moved = await store.putAttachment("code-1", new TextEncoder().encode("y=2"), "text/plain;charset=utf-8", true);
+  assert.notEqual(moved, "code-1");
+  const first = await store.importCanvas(canvas, { "code-1": moved }, true);
+  const second = await store.importCanvas(canvas, { "code-1": moved }, true);
+  assert.notEqual(first, canvas.id);
+  assert.notEqual(first, second, "each chosen import is its own canvas");
+  const imported = (await store.load()).canvases.find((c) => c.id === first)!;
+  assert.equal(imported.messages[0].files?.[0].id, moved);
+});

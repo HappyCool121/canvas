@@ -18,6 +18,13 @@ import {
   requestHistory,
   visualParent,
   withoutImages,
+  branchIds,
+  CONTINUE_NOTE,
+  copyBranch,
+  detachBranch,
+  estimateTokens,
+  rootIds,
+  rootOf,
 } from "../shared/graph";
 import type { Canvas } from "../shared/types";
 import { canvasUsage } from "../shared/usage";
@@ -339,4 +346,83 @@ test("signed automatic offsets preserve upward ordering as unequal bubbles grow"
     const down = automaticOffset(parent,child,{x:0,y:262},true);
     assert.equal(down.y-child.height/2,parent.height/2+52);
   }
+});
+
+test("cutting a branch loose makes it a root whose context starts there", () => {
+  const root = complete(newCanvas(), "Root question", null);
+  const main = complete(root.canvas, "Main continuation", root.answerId);
+  const deeper = complete(main.canvas, "Deeper", main.answerId);
+  const promptId = deeper.canvas.messages.find((m) => m.content === "Main continuation")!.id;
+  // An edit of the cut prompt hangs from it but shares its old context parent.
+  const edited = addTurn(deeper.canvas, "Main, rewritten", null, { editOf: promptId });
+  const withEdit = patchMessage(edited.canvas, edited.answerId, { status: "complete", content: "Edited answer" });
+  assert.deepEqual(rootIds(withEdit), [withEdit.rootId]);
+  assert.equal(branchIds(withEdit, promptId).size, 6, "the prompt, its answer, the follow-up pair and the edit pair");
+  const cut = detachBranch(withEdit, promptId);
+  const roots = rootIds(cut);
+  assert.equal(roots.length, 2);
+  assert.equal(roots[1], promptId);
+  const prompt = cut.messages.find((m) => m.id === promptId)!;
+  assert.equal(prompt.parentId, null);
+  assert.equal(prompt.layoutOffset, undefined);
+  const editPrompt = cut.messages.find((m) => m.content === "Main, rewritten")!;
+  assert.equal(editPrompt.parentId, null, "the edit no longer reaches the old ancestors");
+  assert.equal(editPrompt.editOf, promptId, "and still hangs from the prompt it rewrites");
+  assert.deepEqual(requestHistory(cut, deeper.answerId).map((m) => m.content), ["Main continuation", "Answer to Main continuation", "Deeper"]);
+  assert.equal(rootOf(cut, deeper.answerId), promptId);
+  assert.equal(rootOf(cut, root.answerId), cut.rootId);
+  assert.equal(detachBranch(cut, promptId), cut, "a root is already loose");
+  assert.throws(() => detachBranch(addTurn(cut, "Pending", deeper.answerId).canvas, promptId), /Wait for the answer/);
+});
+
+test("a branch that starts with an answer sends a short user turn first", () => {
+  const root = complete(newCanvas(), "Root question", null);
+  const next = complete(root.canvas, "Follow-up", root.answerId);
+  const cut = detachBranch(next.canvas, root.answerId);
+  const history = requestHistory(cut, next.answerId);
+  assert.deepEqual(history.map((m) => [m.role, m.content]), [
+    ["user", CONTINUE_NOTE],
+    ["assistant", "Answer to Root question"],
+    ["user", "Follow-up"],
+  ]);
+});
+
+test("a branch copied to a new canvas gets fresh ids, its own root and the same layout", () => {
+  const root = complete(newCanvas(), "Root question", null);
+  const main = complete(root.canvas, "Main continuation", root.answerId);
+  const source = { ...main.canvas, layout: "force-v2" as const, viewport: { x: 5, y: 6, zoom: 0.7 } };
+  const top = source.messages.find((m) => m.id === root.answerId)!;
+  const copy = copyBranch(source, root.answerId);
+  assert.notEqual(copy.id, source.id);
+  assert.equal(copy.messages.length, 3);
+  assert.ok(copy.messages.every((m) => !source.messages.some((s) => s.id === m.id)), "every message has a new id");
+  assert.equal(copy.rootId, copy.selectedId);
+  const newRoot = copy.messages.find((m) => m.id === copy.rootId)!;
+  assert.equal(newRoot.content, top.content);
+  assert.equal(newRoot.parentId, null);
+  assert.deepEqual(newRoot.position, { x: 0, y: 0 });
+  const follow = copy.messages.find((m) => m.content === "Main continuation")!;
+  const original = source.messages.find((m) => m.content === "Main continuation")!;
+  assert.equal(follow.parentId, copy.rootId);
+  assert.deepEqual(follow.position, { x: original.position.x - top.position.x, y: original.position.y - top.position.y });
+  assert.equal(copy.layout, "force-v2");
+  assert.equal(copy.viewport.zoom, 0.7);
+  assert.equal(copy.title, "Answer to Root question", "titled after its first bubble");
+  assert.equal(source.messages.length, 4, "the source is untouched");
+  assert.equal(source.messages.find((m) => m.id === root.answerId)!.parentId, top.parentId);
+});
+
+test("prompts carry files and the answer's thinking level; a named canvas keeps its name", () => {
+  const files = [{ id: "file-1", name: "app.py", bytes: 400, lines: 12 }];
+  const named = { ...newCanvas(), title: "My plan" };
+  const turn = addTurn(named, "", null, { files, reasoning: "high" });
+  const [prompt, answer] = turn.canvas.messages;
+  assert.deepEqual(prompt.files, files);
+  assert.equal(answer.reasoning, "high");
+  assert.equal(turn.canvas.title, "My plan");
+  assert.equal(addTurn(newCanvas(), "", null, { files }).canvas.title, "app.py");
+  assert.equal(estimateTokens({ content: "", files }), 100 + 4);
+  const done = patchMessage(turn.canvas, turn.answerId, { status: "complete", content: "Read it" });
+  const next = addTurn(done, "And then?", turn.answerId);
+  assert.deepEqual(requestHistory(next.canvas, next.answerId)[0].files, files);
 });

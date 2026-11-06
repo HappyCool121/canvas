@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
-import { ChevronLeft, LoaderCircle } from "lucide-react";
+import { ChevronLeft, LoaderCircle, X } from "lucide-react";
 import { useWorkspace } from "./useWorkspace";
 import { Graph } from "./Graph";
 import type { CameraRequest } from "./camera";
 import { ImageLoaderContext } from "./images";
 import { CanvasMark, Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";
-import { ReadingPanel } from "./ReadingPanel";
+import { ExpandButton, ReadingPanel } from "./ReadingPanel";
+import { ChatTranscript } from "./ChatTranscript";
 import { DocumentPages } from "./DocumentPages";
 import { Composer } from "./Composer";
 import { ContextMeter } from "./ContextMeter";
@@ -15,11 +16,12 @@ import { ProviderDialog } from "./ProviderDialog";
 import { PlanRetryDialog } from "./PlanRetryDialog";
 import { api } from "./api";
 import { ancestorPath, contextTokens, visualParent } from "../shared/graph";
-import { CHATGPT_PLAN, CHATGPT_PLAN_NAME, modelKey, parseModelKey, unknownModel, type ModelInfo } from "../shared/models";
+import { CHATGPT_PLAN, CHATGPT_PLAN_NAME, REASONING_KEY, modelKey, parseModelKey, parseReasoning, unknownModel, type ModelInfo } from "../shared/models";
 import type { Canvas, Message, PlanIssue, ProvidersState } from "../shared/types";
 
 const SIDEBAR_KEY = "canvas.sidebar";
 const MODEL_KEY = "canvas.model";
+const MINIMAP_KEY = "canvas.minimap";
 
 function stored(key: string) {
   try {
@@ -66,6 +68,8 @@ export default function App() {
     () => stored(SIDEBAR_KEY) === "collapsed" ||
       (stored(SIDEBAR_KEY) === null && matchMedia("(max-width: 700px)").matches),
   );
+  // The minimap covers a corner of the canvas, so it starts closed.
+  const [minimapOpen, setMinimapOpen] = useState(false);
   // "provider/model"; an older plain model id means DeepSeek.
   const [modelChoice, setModelChoice] = useState(() => stored(MODEL_KEY));
   const connectedIds = new Set(providers.connected.map((c) => c.id));
@@ -78,6 +82,10 @@ export default function App() {
     (choice && models.find((m) => m.provider === choice.provider && m.id === choice.id)) ??
     (choice && (choice.provider === CHATGPT_PLAN || connectedIds.has(choice.provider)) ? unknownModel(choice.provider, providerName(choice.provider), choice.id) : undefined) ??
     models.find(m => m.provider !== CHATGPT_PLAN) ?? NO_MODEL;
+  // The last thinking level chosen for each model, if it still offers it.
+  const levels = parseReasoning(workspace.preferences[REASONING_KEY]);
+  const chosenLevel = levels[modelKey(model.provider, model.id)];
+  const reasoning = chosenLevel && model.efforts?.includes(chosenLevel) ? chosenLevel : undefined;
   const [camera, setCamera] = useState<CameraRequest>();
   const [lastRead, setLastRead] = useState<{ canvasId: string; message: Message }>();
   const [providerOpen, setProviderOpen] = useState(false);
@@ -96,6 +104,7 @@ export default function App() {
     const prefs = workspace.preferences;
     if (prefs[SIDEBAR_KEY]) setSidebarCollapsed(prefs[SIDEBAR_KEY] === "collapsed");
     if (prefs[MODEL_KEY]) setModelChoice(prefs[MODEL_KEY]);
+    if (prefs[MINIMAP_KEY]) setMinimapOpen(prefs[MINIMAP_KEY] === "open");
   }, [workspace.loading]);
   useEffect(() => {
     store(SIDEBAR_KEY, sidebarCollapsed ? "collapsed" : "open");
@@ -112,6 +121,9 @@ export default function App() {
     const listener = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || workspace.pageSelection) return;
       if (canvas.editingId) workspace.cancelEdit(canvas.id);
+      // Chat mode steps back to the side panel before anything is deselected.
+      else if (canvas.readerExpanded && canvas.readingPanelOpen !== false && canvas.selectedId)
+        void workspace.update(canvas.id, (c) => ({ ...c, readerExpanded: false }));
       else {
         stage.current?.dispatchEvent(new Event("canvas-clear-selection"));
         workspace.deselect(canvas.id);
@@ -119,7 +131,7 @@ export default function App() {
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, [canvas?.id, canvas?.selectedId, canvas?.editingId, workspace.pageSelection]);
+  }, [canvas?.id, canvas?.selectedId, canvas?.editingId, canvas?.readerExpanded, canvas?.readingPanelOpen, workspace.pageSelection]);
 
   // Keys live in server memory, so recheck when a restart may have cleared them.
   const generatingAny = workspace.canvases.some((c) => c.messages.some((m) => m.status === "pending"));
@@ -174,6 +186,8 @@ export default function App() {
   if (canvas && selected && (lastRead?.canvasId !== canvas.id || lastRead.message !== selected))
     setLastRead({ canvasId: canvas.id, message: selected });
   const readerOpen = !!selected && canvas?.readingPanelOpen !== false;
+  // Chat mode: the reader covers the canvas as a chat of the selected branch.
+  const chat = readerOpen && !!canvas?.readerExpanded;
   const reading = selected ?? (lastRead?.canvasId === canvas?.id ? lastRead?.message : undefined);
   const retryAnswer = retryTarget?.canvasId === canvas?.id
     ? canvas?.messages.find(message => message.id === retryTarget?.answerId) : undefined;
@@ -226,6 +240,15 @@ export default function App() {
           activeId={canvas.id}
           collapsed={sidebarCollapsed}
           onCollapse={() => { setSidebarCollapsed(true); workspace.setPreference(SIDEBAR_KEY, "collapsed"); }}
+          onImport={workspace.importFile}
+          onRename={workspace.renameCanvas}
+          onDelete={(id) => void workspace.deleteCanvas(id)}
+          folders={workspace.folders}
+          onCreateFolder={() => workspace.createFolder()}
+          onRenameFolder={workspace.renameFolder}
+          onDeleteFolder={workspace.deleteFolder}
+          onMoveCanvas={workspace.moveCanvas}
+          onToggleFolder={workspace.toggleFolder}
           onCreate={() => {
             setCamera(undefined);
             workspace.createCanvas();
@@ -246,7 +269,7 @@ export default function App() {
         />
         <ReactFlowProvider key={canvas.id}>
           <main className="main-workspace">
-            <div ref={stage} className={`workspace-stage ${empty ? "empty" : ""}`} data-reading={readerOpen}>
+            <div ref={stage} className={`workspace-stage ${empty ? "empty" : ""}`} data-reading={readerOpen} data-chat={chat}>
               {!empty && (
                 <Graph
                   canvas={canvas}
@@ -259,9 +282,17 @@ export default function App() {
                   onPlanSettings={(profileId, reconsent) => openProviders({ profileId, reconsent })}
                   onPlanReroute={(answerId) => setRetryTarget({ canvasId: canvas.id, answerId })}
                   onAppearance={(id, patch) => {
-                    setCamera({ ids: [id] });
+                    // Resizing modes reframe the bubble; colors leave the camera alone.
+                    if (patch.displayMode !== undefined) setCamera({ ids: [id] });
                     void workspace.update(canvas.id, (c) => ({ ...c, messages: c.messages.map((m) => m.id === id ? { ...m, ...patch } : m) }));
                   }}
+                  onBranch={(id, mode) => void workspace.branchOff(canvas.id, id, mode).then((copy) => {
+                    if (copy?.rootId) setCamera({ ids: [copy.rootId] });
+                  })}
+                  onFocus={(id) => { select(id); setCamera({ ids: [id] }); }}
+                  savedColors={workspace.savedColors}
+                  onSaveColor={workspace.saveColor}
+                  minimap={minimapOpen && !chat}
                   onResize={(id, size, position, offset) => {
                     void workspace.update(canvas.id, (c) => ({ ...c, layout: "force-v2", messages: c.messages.map((m) => m.id === id ? { ...m, placementOffset: undefined, position, sizes: { ...m.sizes, [m.displayMode || "preview"]: size }, ...(offset ? { layoutOffset: offset } : {}) } : m) }));
                   }}
@@ -314,7 +345,18 @@ export default function App() {
                   select(id);
                   setCamera({ ids: [id] });
                 }}
+                minimap={minimapOpen}
+                onMinimap={() => {
+                  setMinimapOpen(!minimapOpen);
+                  workspace.setPreference(MINIMAP_KEY, minimapOpen ? "closed" : "open");
+                }}
               />
+              {workspace.notice && !(empty || selected) && (
+                <div className="workspace-alert" role="alert">
+                  <p>{workspace.notice}</p>
+                  <button onClick={workspace.dismissNotice}>Dismiss</button>
+                </div>
+              )}
               <ContextMeter
                 tokens={
                   canvas.selectedId
@@ -352,6 +394,7 @@ export default function App() {
                       model,
                       (ids, first) => setCamera({ ids: first ? [ids[1]] : ids, first, center: true, followId: ids[1] }),
                       geometry.current,
+                      reasoning,
                     );
                     composer.current?.focus({ preventScroll: true });
                   }}
@@ -367,9 +410,15 @@ export default function App() {
                   onRemoveImage={(id) =>
                     workspace.removeDraftImage(canvas.id, id)
                   }
+                  onRemoveFile={(id) => workspace.removeDraftFile(canvas.id, id)}
                   onCancelEdit={() => workspace.cancelEdit(canvas.id)}
                   onDismissNotice={workspace.dismissNotice}
                   onModel={(m) => { const key = modelKey(m.provider, m.id); setModelChoice(key); workspace.setPreference(MODEL_KEY, key); }}
+                  reasoning={reasoning}
+                  onReasoning={(level) => {
+                    const { [modelKey(model.provider, model.id)]: _previous, ...rest } = levels;
+                    workspace.setPreference(REASONING_KEY, JSON.stringify(level ? { ...rest, [modelKey(model.provider, model.id)]: level } : rest));
+                  }}
                 />
               )}
               {selected && !readerOpen && <button className="reader-reopen icon-button" aria-label="Open reading panel" aria-controls="reading-panel" aria-expanded={false} onClick={() => void workspace.update(canvas.id, c => ({ ...c, readingPanelOpen: true }))}><ChevronLeft size={18} /></button>}
@@ -377,16 +426,36 @@ export default function App() {
                 id="reading-panel"
                 className="reading-panel"
                 data-open={readerOpen}
+                data-expanded={chat}
                 inert={!readerOpen}
                 aria-hidden={!readerOpen}
-                aria-label="Full message"
+                aria-label={chat ? "Chat with the selected branch" : "Full message"}
               >
-                {reading && (
+                {chat ? (
+                  <>
+                    <ExpandButton expanded onToggle={() => void workspace.update(canvas.id, c => ({ ...c, readerExpanded: false }))} />
+                    <button className="icon-button reading-close" aria-label="Close reading panel" onClick={() => {
+                      void workspace.update(canvas.id, c => ({ ...c, readingPanelOpen: false, readerExpanded: false }));
+                      composer.current?.focus({ preventScroll: true });
+                    }}>
+                      <X size={18} />
+                    </button>
+                    <ChatTranscript
+                      canvas={canvas}
+                      canEdit={!generating && !workspace.preparing}
+                      generating={generating}
+                      onSelect={select}
+                      onEdit={(id) => workspace.startEdit(canvas.id, id)}
+                      onRetry={(id) => void workspace.retry(canvas.id, id)}
+                    />
+                  </>
+                ) : reading && (
                   <ReadingPanel
                     message={reading}
                     canEdit={!generating && !workspace.preparing}
                     onEdit={() => workspace.startEdit(canvas.id, reading.id)}
-                    onClose={() => { void workspace.update(canvas.id, c => ({ ...c, readingPanelOpen: false })); composer.current?.focus({ preventScroll: true }); }}
+                    onClose={() => { void workspace.update(canvas.id, c => ({ ...c, readingPanelOpen: false, readerExpanded: false })); composer.current?.focus({ preventScroll: true }); }}
+                    onExpand={() => { void workspace.update(canvas.id, c => ({ ...c, readerExpanded: true })); composer.current?.focus({ preventScroll: true }); }}
                   />
                 )}
               </aside>

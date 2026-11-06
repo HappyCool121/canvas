@@ -343,8 +343,8 @@ export function createChatGPTPlan({ directory, fetcher = fetch }: { directory?: 
       if (!info) throw modelUnavailable();
       return info;
     },
-    generate(id: string, model: string, messages: ChatMessage[], signal: AbortSignal) {
-      return withAccount(id, signal, (token, signal) => protocol.generate(token, model, messages, signal));
+    generate(id: string, model: string, messages: ChatMessage[], signal: AbortSignal, reasoning?: string) {
+      return withAccount(id, signal, (token, signal) => protocol.generate(token, model, messages, signal, reasoning));
     },
     async close() {
       if (pending) end(pending);

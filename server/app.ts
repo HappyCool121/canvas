@@ -1,12 +1,13 @@
 import { createReadStream } from "node:fs";
 import { checkImageBudget, MAX_IMAGES, MAX_REQUEST_BYTES } from "../shared/attachments";
 import express from "express";
-import { createWorkspace, validId, validCanvas } from "./workspace";
+import { createWorkspace, intactGraph, validId, validCanvas } from "./workspace";
+import { validColorsPreference, validFoldersPreference, FOLDERS_KEY, COLORS_KEY } from "../shared/folders";
 import type { ChatMessage, ProviderConnection, ProvidersState } from "../shared/types";
 import { ApiError, openAICompatible, type ConnectionSettings, type ProviderAdapter } from "./provider";
 import { catalogIds, modelInfo } from "./catalog";
 import type { EnvConnection } from "./config";
-import { CHATGPT_PLAN, LEGACY_MODEL, LEGACY_PROVIDER, MODEL_ID } from "../shared/models";
+import { CHATGPT_PLAN, LEGACY_MODEL, LEGACY_PROVIDER, MODEL_ID, REASONING_KEY, validReasoning, validReasoningPreference } from "../shared/models";
 import { planIssue, type ChatGPTPlan } from "./chatgpt-plan";
 import { RESOURCE, revoked } from "./chatgpt-plan/protocol";
 import { PRESETS, presetById, unfinishedBaseUrl, type Preset } from "../shared/providers";
@@ -52,6 +53,17 @@ function checkBaseUrl(preset: Preset, raw: unknown) {
     throw invalid("Use an https:// address. Plain http:// works only for this computer or your local network.");
   return url;
 }
+
+// Workspace preferences the app may save, each with its own check.
+const shortText = (value: unknown) => typeof value === "string" && value.length <= 300;
+const PREFERENCES: Record<string, (value: unknown) => boolean> = {
+  "canvas.sidebar": shortText,
+  "canvas.model": shortText,
+  "canvas.minimap": (value) => value === "open" || value === "closed",
+  [FOLDERS_KEY]: validFoldersPreference,
+  [COLORS_KEY]: validColorsPreference,
+  [REASONING_KEY]: validReasoningPreference,
+};
 
 type Connection = {
   preset: Preset;
@@ -273,12 +285,18 @@ export function createApp({
   });
   app.put("/api/workspace/preferences", (req, res, next) => {
     const { activeId, values, importOnly } = req.body || {};
-    if ((activeId !== undefined && !validId(activeId)) || (values !== undefined && (!values || typeof values !== "object" || Object.entries(values).some(([k, v]) => !["canvas.sidebar", "canvas.model"].includes(k) || typeof v !== "string" || v.length > 300)))) return next(new ApiError(400, "invalid_preferences", "Invalid workspace preferences."));
+    if ((activeId !== undefined && !validId(activeId)) || (values !== undefined && (!values || typeof values !== "object" || Object.entries(values).some(([k, v]) => !Object.hasOwn(PREFERENCES, k) || typeof v !== "string" || !PREFERENCES[k](v))))) return next(new ApiError(400, "invalid_preferences", "Invalid workspace preferences."));
     storage(() => workspace.setPreferences({ activeId, values }, importOnly === true), res, next);
   });
+  app.delete("/api/workspace/canvases/:id", (req, res, next) => {
+    if (!validId(req.params.id)) return next(new ApiError(400, "invalid_canvas", "Invalid canvas identifier."));
+    storage(() => workspace.remove(req.params.id as string), res, next);
+  });
   app.post("/api/workspace/import", (req, res, next) => {
-    if (!validCanvas(req.body?.canvas)) return next(new ApiError(400, "invalid_import", "Invalid browser canvas."));
-    storage(async () => ({ id: await workspace.importCanvas(req.body.canvas, req.body.assets) }), res, next);
+    const fresh = req.body?.fresh === true;
+    if (!validCanvas(req.body?.canvas) || (fresh && !intactGraph(req.body.canvas)))
+      return next(new ApiError(400, "invalid_import", fresh ? "This Canvas file has a broken or unsupported conversation graph. Your original file has not been changed." : "Invalid browser canvas."));
+    storage(async () => ({ id: await workspace.importCanvas(req.body.canvas, req.body.assets, fresh) }), res, next);
   });
   app.put("/api/workspace/attachments/:id", (req, res, next) => {
     if (!validId(req.params.id)) return next(new ApiError(400, "invalid_attachment", "Invalid attachment bytes."));
@@ -310,6 +328,7 @@ export function createApp({
       provider: providerId = LEGACY_PROVIDER,
       model = LEGACY_MODEL,
       profileId,
+      reasoning,
     } = req.body || {};
     const validId = (id: unknown) =>
       typeof id === "string" && /^[a-zA-Z0-9_-]{1,100}$/.test(id);
@@ -318,6 +337,7 @@ export function createApp({
       !validId(requestId) ||
       typeof model !== "string" ||
       !MODEL_ID.test(model) ||
+      (reasoning !== undefined && !validReasoning(reasoning)) ||
       !Array.isArray(messages) ||
       !messages.length ||
       !messages.every(validMessage) ||
@@ -342,7 +362,7 @@ export function createApp({
     }
     // Capture the exact key or plan account for this answer.
     const provider: Pick<ProviderAdapter, "generate" | "upload"> = plan
-      ? { generate: (model, messages, signal) => plan.generate(profileId, model, messages, signal) }
+      ? { generate: (model, messages, signal, options) => plan.generate(profileId, model, messages, signal, options?.reasoning) }
       : connection!.adapter;
     if (active.has(canvasId)) {
       next(
@@ -393,7 +413,7 @@ export function createApp({
         resolved.push({ role, content, ...(inline.length ? { images: inline } : {}), ...(fileIds.length ? { fileIds } : {}) });
       }
       timer = setTimeout(() => controller.abort(), timeoutMs);
-      const result = await provider.generate(model, resolved, controller.signal);
+      const result = await provider.generate(model, resolved, controller.signal, { reasoning });
       if (controller.signal.aborted) throw new Error("aborted");
       res.json(result);
     } catch (error) {

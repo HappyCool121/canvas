@@ -118,7 +118,7 @@ export function useForceLayout({
   ids,
   ready,
   trustRestored,
-  rootId,
+  rootIds,
   selectedId,
   pendingId,
   paused,
@@ -132,7 +132,8 @@ export function useForceLayout({
   // Saved positions came from this layout. Crowded maps can take longer to
   // settle than the cooling allows, so reopening one must not resume motion.
   trustRestored: boolean;
-  rootId: string | null;
+  // Bubbles that hang from nothing; they hold still while nothing is selected.
+  rootIds: string[];
   selectedId: string | null;
   pendingId?: string;
   paused: boolean;
@@ -165,6 +166,12 @@ export function useForceLayout({
   const diagnostics = useRef({ ticks: 0, simulated: 0 });
   const initialised = useRef(false);
   const restoredIds = useRef(new Set(ids));
+  // A trusted restored layout stays put through late measurement (fonts and
+  // math finishing after load) until the person selects, moves or adds anything.
+  const untouched = useRef(false);
+  const inputs = useRef("");
+  const rootKey = rootIds.join("|");
+  const roots = new Set(rootIds);
 
   const positions = () => {
     const changes = new Map<string, Point>();
@@ -211,7 +218,7 @@ export function useForceLayout({
         held.current = true;
         simulation.current!.alphaDecay(0.04).velocityDecay(0.42);
         diagnostics.current.simulated = selected.current ? 1 : list().length;
-        for (const b of list()) { const fixed = selected.current ? b.id !== selected.current : b.id === rootId; b.fx = fixed ? b.x : null; b.fy = fixed ? b.y : null; }
+        for (const b of list()) { const fixed = selected.current ? b.id !== selected.current : roots.has(b.id); b.fx = fixed ? b.x : null; b.fy = fixed ? b.y : null; }
         stationary.current = selected.current ? new SpatialIndex(list().filter(b=>b.id!==selected.current)) : null;
         simulation.current!.nodes(selected.current ? list().filter(b=>b.id===selected.current) : list());
       }
@@ -332,6 +339,9 @@ export function useForceLayout({
     .join("|");
   useLayoutEffect(() => {
     if (!ready) return;
+    const key = [structure, rootKey, selectedId, pendingId, paused].join("\n");
+    if (inputs.current && inputs.current !== key) untouched.current = false;
+    inputs.current = key;
     if (resizing.current !== selectedId) resizing.current = null;
     const sim = simulation.current!;
     const recent = restedInsertion.current;
@@ -434,7 +444,7 @@ export function useForceLayout({
     const chosen = active();
     for (const body of next.values()) {
       body.vx = body.vy = 0;
-      const pinned = paused || dragging.current || held.current || (local ? !local.ids.has(body.id) || body.id === local.parentId : chosen ? body.id !== chosen : body.id === rootId);
+      const pinned = paused || dragging.current || held.current || (local ? !local.ids.has(body.id) || body.id === local.parentId : chosen ? body.id !== chosen : roots.has(body.id));
       body.fx = pinned ? body.x : null;
       body.fy = pinned ? body.y : null;
     }
@@ -452,7 +462,7 @@ export function useForceLayout({
     if (!next.size || resizing.current || paused || dragging.current || held.current) return;
     const restored = !initialised.current;
     initialised.current = true;
-    if (restored && trustRestored && !local) return;
+    if (restored && trustRestored && !local) { untouched.current = true; return; }
     if (local && !local.launched) {
       local.launched = true;
       // One outward launch; only insertion uses the hotter, faster-cooling mode.
@@ -467,10 +477,10 @@ export function useForceLayout({
       publish(); kick(0.85);
     }
     else if (local && resized) { publish(); kick(0.45); }
-    else if ((restored && overlapping()) || unsettled())
+    else if (untouched.current && !local ? overlapping() : (restored && overlapping()) || unsettled())
       kick(restored ? 0.2 : 0.3);
     else if (local?.completed) { settle(); finishInsertion(); }
-  }, [ready, structure, sizes, rootId, selectedId, pendingId, paused, kick]);
+  }, [ready, structure, sizes, rootKey, selectedId, pendingId, paused, kick]);
 
   // Completion content is measured after the status update. Keep the local group
   // movable until those dimensions have stopped changing for a few frames.
@@ -491,6 +501,7 @@ export function useForceLayout({
   useEffect(() => () => void simulation.current?.stop(), []);
 
   const dragStart = useCallback(() => {
+    untouched.current = false;
     pauseLayout();
     dragging.current = true;
     held.current = true;
@@ -519,6 +530,7 @@ export function useForceLayout({
   }, [drag]);
 
   const resizeStart = useCallback((id: string) => {
+    untouched.current = false;
     if (insertion.current) callbacks.current.onSettle(new Map(list().map(b => [b.id,{x:b.x-b.width/2,y:b.y-b.height/2}])), true);
     insertion.current = null;
     restedInsertion.current = null;

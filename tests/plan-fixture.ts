@@ -102,7 +102,9 @@ export function planFixture(options: {
     assert.ok(authorization && authorization.startsWith("Bearer mock-access-credential-"));
     const account = authorization.slice("Bearer mock-access-credential-".length);
     if (target.pathname === "/v1/models") return Response.json({ models: [
-      { slug: "gpt-6.1-sol", display_name: "Plan Vision", visibility: "list" },
+      { slug: "gpt-6.1-sol", display_name: "Plan Vision", visibility: "list",
+        supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "xhigh" }, { effort: "unheard-of" }],
+        default_reasoning_level: "medium" },
       { slug: `unknown-${account}`, display_name: "Plan Text", visibility: "list" },
       { slug: "hidden", display_name: "Hidden", visibility: "hidden" },
     ] });

@@ -16,7 +16,38 @@ export type ModelInfo = {
   contextWindow?: number;
   // Local account that supplied this ChatGPT plan model.
   profileId?: string;
+  // Thinking levels this model accepts, weakest first; absent when it has none to choose.
+  efforts?: string[];
+  // The level the provider uses when Canvas sends none, when it is known.
+  defaultEffort?: string;
 };
+
+// Every thinking level Canvas can request. "off"/"on" are for providers that
+// only switch thinking on or off.
+export const REASONING_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "off", "on"] as const;
+export const validReasoning = (value: unknown): value is string =>
+  typeof value === "string" && (REASONING_LEVELS as readonly string[]).includes(value);
+export const EFFORT_LEVELS = ["low", "medium", "high"];
+// DeepSeek maps every effort to low, high or max; Canvas keeps its thinking off by default.
+export const DEEPSEEK_LEVELS = ["low", "high", "max"];
+// Thinking budgets for Anthropic, which ignores reasoning_effort on its OpenAI-compatible endpoint.
+export const THINKING_BUDGETS: Record<string, number> = { low: 2048, medium: 6144, high: 12288 };
+// Levels that keep thinking off.
+export const thinkingOff = (level: string | undefined) => level === "off" || level === "none";
+// The last level chosen for each "provider/model", saved as a JSON preference.
+export const REASONING_KEY = "canvas.reasoning";
+export function validReasoningPreference(value: unknown) {
+  if (typeof value !== "string" || value.length > 16 * 1024) return false;
+  try {
+    const parsed = JSON.parse(value);
+    return !!parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+      Object.entries(parsed).every(([key, level]) => key.length <= 300 && validReasoning(level));
+  } catch { return false; }
+}
+export const parseReasoning = (value: string | undefined): Record<string, string> =>
+  value && validReasoningPreference(value) ? JSON.parse(value) : {};
+// A label for a level: "High", "Off", "Extra high".
+export const effortLabel = (level: string) => level === "xhigh" ? "Extra high" : level[0].toUpperCase() + level.slice(1);
 
 export const CHATGPT_PLAN = "chatgpt-plan";
 export const CHATGPT_PLAN_NAME = "ChatGPT plan";

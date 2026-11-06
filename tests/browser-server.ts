@@ -42,6 +42,23 @@ const markdown = [
   '<img src=x onerror="window.__markdownExecuted = true">',
 ];
 const attempts = new Map<string, number>();
+// The latest chat request a provider received, for assertions about what was sent.
+let lastChat: unknown;
+const website = [
+  "Here is a small page.",
+  "",
+  "```html",
+  "<!doctype html><html><head><title>Demo</title></head><body><h1 id=\"title\">Hello site</h1></body></html>",
+  "```",
+  "",
+  "```css",
+  "h1 { color: rgb(200, 0, 0); }",
+  "```",
+  "",
+  "```js",
+  "document.getElementById('title').dataset.ran = 'yes';",
+  "```",
+].join("\n");
 // Model lists: DeepSeek's two models, and the first few of OpenAI's catalog.
 const listed: Record<string, string[]> = {
   "api.deepseek.com": ["deepseek-flash", "deepseek-v4-pro"],
@@ -52,6 +69,7 @@ const fetcher: typeof fetch = async (_url, init) => {
   if (String(_url).endsWith("/files")) return Response.json({ id: `file-api-${crypto.randomUUID()}`, expires_at: Math.floor(Date.now()/1000)+86400 });
   if (String(_url).endsWith("/models")) return Response.json({ data: (listed[new URL(String(_url)).host] ?? []).map((id) => ({ id })) });
   const body = JSON.parse(init?.body as string);
+  lastChat = body;
   const content = body.messages.at(-1).content as
     | string
     | { type: string; text?: string }[];
@@ -78,7 +96,7 @@ const fetcher: typeof fetch = async (_url, init) => {
       { once: true },
     );
   });
-  const reply =
+  const reply = last.includes("website-test") ? website :
     markdown.join("\n") +
     "\n\n" +
     last +
@@ -143,6 +161,7 @@ app.post("/test/reset", (req, res) => {
   fixtures.set(String(run), testApp);
   res.json({ ok: true, run });
 });
+app.get("/test/last-chat", (_req, res) => res.json(lastChat ?? null));
 app.use((req, res, next) => (fixtures.get(req.get("X-Canvas-Test-Run") || "") || testApp)(req, res, next));
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 app.use(express.static(path.join(root, "dist")));

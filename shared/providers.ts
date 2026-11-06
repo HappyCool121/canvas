@@ -25,6 +25,9 @@ export type Preset = {
   extraBody?: Record<string, unknown>;
   // Reasoning is turned off by extraBody, so the normal output cap applies.
   reasoningOff?: boolean;
+  // How a thinking level is requested: OpenAI-style reasoning_effort (the default),
+  // OpenRouter's reasoning object, Anthropic's thinking budget, or DeepSeek's switch plus effort.
+  reasoning?: "effort" | "openrouter" | "anthropic" | "deepseek";
   // Images go through the provider's Files API instead of inline data URLs.
   files?: boolean;
   // models.dev providers that describe this preset's models, merged in order.
@@ -33,9 +36,9 @@ export type Preset = {
 
 export const PRESETS: Preset[] = [
   { id: "openai", name: "OpenAI", group: "Model makers", baseUrl: "https://api.openai.com/v1", keyUrl: "https://platform.openai.com/api-keys", env: [{ key: "OPENAI_API_KEY" }], maxTokensField: "max_completion_tokens", catalog: ["openai"] },
-  { id: "anthropic", name: "Anthropic", group: "Model makers", baseUrl: "https://api.anthropic.com/v1", keyUrl: "https://console.anthropic.com/settings/keys", env: [{ key: "ANTHROPIC_API_KEY" }], auth: "anthropic", catalog: ["anthropic"] },
+  { id: "anthropic", name: "Anthropic", group: "Model makers", baseUrl: "https://api.anthropic.com/v1", keyUrl: "https://console.anthropic.com/settings/keys", env: [{ key: "ANTHROPIC_API_KEY" }], auth: "anthropic", reasoning: "anthropic", catalog: ["anthropic"] },
   { id: "google", name: "Google Gemini", group: "Model makers", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", keyUrl: "https://aistudio.google.com/apikey", env: [{ key: "GEMINI_API_KEY" }], catalog: ["google"] },
-  { id: "deepseek", name: "DeepSeek", group: "Model makers", baseUrl: "https://api.deepseek.com", keyUrl: "https://platform.deepseek.com/api_keys", env: [{ key: "DEEPSEEK_API_KEY" }], validatePath: "/user/balance", balanceCheck: true, extraBody: { thinking: { type: "disabled" } }, reasoningOff: true, files: true, catalog: ["deepseek"] },
+  { id: "deepseek", name: "DeepSeek", group: "Model makers", baseUrl: "https://api.deepseek.com", keyUrl: "https://platform.deepseek.com/api_keys", env: [{ key: "DEEPSEEK_API_KEY" }], validatePath: "/user/balance", balanceCheck: true, extraBody: { thinking: { type: "disabled" } }, reasoningOff: true, reasoning: "deepseek", files: true, catalog: ["deepseek"] },
   { id: "xai", name: "xAI", group: "Model makers", baseUrl: "https://api.x.ai/v1", keyUrl: "https://console.x.ai", env: [{ key: "XAI_API_KEY" }], catalog: ["xai"] },
   { id: "mistral", name: "Mistral", group: "Model makers", baseUrl: "https://api.mistral.ai/v1", keyUrl: "https://console.mistral.ai/api-keys", env: [{ key: "MISTRAL_API_KEY" }], catalog: ["mistral"] },
   { id: "moonshot", name: "Moonshot AI", group: "Model makers", baseUrl: "https://api.moonshot.ai/v1", baseUrlChoices: ["https://api.moonshot.ai/v1", "https://api.moonshot.cn/v1"], keyUrl: "https://platform.moonshot.ai/console/api-keys", env: [{ key: "MOONSHOT_API_KEY" }], catalog: ["moonshotai", "moonshotai-cn"] },
@@ -54,7 +57,7 @@ export const PRESETS: Preset[] = [
   { id: "nvidia", name: "NVIDIA NIM", group: "Fast hosts", baseUrl: "https://integrate.api.nvidia.com/v1", keyUrl: "https://build.nvidia.com", env: [{ key: "NVIDIA_API_KEY" }], validatePath: null, catalog: ["nvidia"] },
   { id: "huggingface", name: "Hugging Face", group: "Fast hosts", baseUrl: "https://router.huggingface.co/v1", keyUrl: "https://huggingface.co/settings/tokens", env: [{ key: "HF_TOKEN" }], validatePath: null, catalog: ["huggingface"] },
 
-  { id: "openrouter", name: "OpenRouter", group: "Gateways", baseUrl: "https://openrouter.ai/api/v1", keyUrl: "https://openrouter.ai/settings/keys", env: [{ key: "OPENROUTER_API_KEY" }], validatePath: "/key", catalog: ["openrouter"] },
+  { id: "openrouter", name: "OpenRouter", group: "Gateways", baseUrl: "https://openrouter.ai/api/v1", keyUrl: "https://openrouter.ai/settings/keys", env: [{ key: "OPENROUTER_API_KEY" }], validatePath: "/key", reasoning: "openrouter", catalog: ["openrouter"] },
   { id: "vercel", name: "Vercel AI Gateway", group: "Gateways", baseUrl: "https://ai-gateway.vercel.sh/v1", keyUrl: "https://vercel.com/dashboard/ai-gateway", env: [{ key: "AI_GATEWAY_API_KEY" }], validatePath: "/credits", catalog: ["vercel"] },
   { id: "opencode", name: "OpenCode Zen", group: "Gateways", baseUrl: "https://opencode.ai/inference/openai/v1", baseUrlChoices: ["https://opencode.ai/inference/openai/v1", "https://opencode.ai/inference/go/openai/v1"], keyUrl: "https://opencode.ai/auth", env: [{ key: "OPENCODE_API_KEY" }], validatePath: null, catalog: ["opencode", "opencode-go"] },
   { id: "cloudflare-workers-ai", name: "Cloudflare Workers AI", group: "Gateways", baseUrl: "https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1", editableBaseUrl: true, keyUrl: "https://dash.cloudflare.com/profile/api-tokens", env: [{ key: "CLOUDFLARE_API_KEY" }], catalog: ["cloudflare-workers-ai"] },

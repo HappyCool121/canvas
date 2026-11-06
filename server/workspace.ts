@@ -4,8 +4,12 @@ import type { Readable } from "node:stream";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { Canvas } from "../shared/types";
+import { validId } from "../shared/ids";
+import { canvasAssets, remapAssets } from "../shared/attachments";
 
-export const validId = (id: unknown): id is string => typeof id === "string" && /^[a-zA-Z0-9_-]{1,100}$/.test(id);
+const assetIds = (c: Canvas) => [...canvasAssets(c).keys()];
+
+export { validId };
 const digest = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 // Sort object keys so legacy snapshots do not depend on property insertion order.
 function canonical(value: unknown): string {
@@ -18,6 +22,20 @@ export function validCanvas(c: Canvas) {
     typeof c.draft === "string" && Number.isFinite(c.updatedAt) && Array.isArray(c.messages) &&
     c.messages.every((m) => m && validId(m.id) && ["user", "assistant"].includes(m.role) && typeof m.content === "string" && Number.isFinite(m.position?.x) && Number.isFinite(m.position?.y)) &&
     Number.isFinite(c.viewport?.x) && Number.isFinite(c.viewport?.y) && Number.isFinite(c.viewport?.zoom);
+}
+// Every link points at a message on the same canvas, without cycles.
+export function intactGraph(c: Canvas) {
+  const byId = new Map(c.messages.map((m) => [m.id, m]));
+  if (byId.size !== c.messages.length) return false;
+  for (const m of c.messages) {
+    if ((m.parentId && !byId.has(m.parentId)) || (m.editOf && !byId.has(m.editOf))) return false;
+    const seen = new Set<string>();
+    for (let id: string | null | undefined = m.id; id; id = byId.get(id)?.parentId) {
+      if (seen.has(id)) return false;
+      seen.add(id);
+    }
+  }
+  return true;
 }
 type Preferences = { activeId?: string; values?: Record<string, string>; imports?: Record<string, string>; browserPreferencesImported?: boolean };
 type Asset = { hash: string; mime: string };
@@ -57,8 +75,7 @@ export function createWorkspace(directory = process.env.CANVAS_DATA_DIR || defau
   const preferences = () => json<Preferences>(prefFile, {});
   async function asset(id: string) { return json<Asset | null>(file("attachments", id), null); }
   async function checkAssets(c: Canvas) {
-    const images = [...(c.draftImages || []), ...c.messages.flatMap((m) => m.images || [])];
-    for (const id of new Set(images.flatMap((i) => [i.id, ...[i.pdf?.id, i.docx?.id].filter((v): v is string => !!v)]))) {
+    for (const id of assetIds(c)) {
       const record = await asset(id);
       if (!record) throw new Error("An attachment is missing. Import or attach it again before saving.");
       // Refuse to acknowledge snapshots with missing bytes, including interrupted imports.
@@ -90,6 +107,15 @@ export function createWorkspace(directory = process.env.CANVAS_DATA_DIR || defau
     }),
     save: (c: Canvas) => { const snapshot = structuredClone(c); return serial(() => save(snapshot)); },
     preferences: () => serial(async () => (await preferences()).values || {}),
+    // Removes the canvas file. Attachment bytes stay, as with removed drafts.
+    remove: (id: string) => serial(async () => {
+      await unlink(file("canvases", id)).catch((error) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+      const prefs = await preferences();
+      if (prefs.activeId === id) {
+        delete prefs.activeId;
+        await atomic(prefFile, JSON.stringify(prefs));
+      }
+    }),
     setPreferences: (patch: { activeId?: string; values?: Record<string, string> }, importOnly = false) => serial(async () => {
       if (patch.activeId !== undefined && !validId(patch.activeId)) throw new Error("Invalid active canvas.");
       const prefs = await preferences();
@@ -152,26 +178,26 @@ export function createWorkspace(directory = process.env.CANVAS_DATA_DIR || defau
       // draft must never break another snapshot or an in-flight save.
       if (!validId(id)) throw new Error("Invalid attachment identifier.");
     }),
-    importCanvas: (canvas: Canvas, assets: Record<string, string>) => serial(async () => {
-      if (!validCanvas(canvas) || !assets || Object.values(assets).some((id) => !validId(id))) throw new Error("Invalid browser import.");
-      const refs = [...(canvas.draftImages || []), ...canvas.messages.flatMap((m) => m.images || [])];
+    // Browser imports are idempotent: a receipt maps each snapshot to its canvas,
+    // so a deleted canvas is never restored. A fresh import (a JSON file the
+    // person chose) always becomes a new canvas.
+    importCanvas: (canvas: Canvas, assets: Record<string, string>, fresh = false) => serial(async () => {
+      if (!validCanvas(canvas) || (fresh && !intactGraph(canvas)) || !assets || Object.values(assets).some((id) => !validId(id))) throw new Error("Invalid browser import.");
       const relevantAssets: Record<string, string> = {};
-      for (const image of refs) for (const id of [image.id, image.pdf?.id, image.docx?.id].filter((v): v is string => !!v)) {
+      for (const id of assetIds(canvas)) {
         relevantAssets[id] = assets[id];
         if (!assets[id]) throw new Error("A browser attachment has not been imported yet.");
       }
       const fingerprint = digest(canonical({ canvas, assets: relevantAssets }));
       const prefs = await preferences();
       const importedId = prefs.imports?.[fingerprint];
-      if (importedId) return importedId;
-      const copy = structuredClone(canvas);
-      const remap = (images: Canvas["draftImages"]) => images?.map((image) => ({
-        ...image, id: assets[image.id] || image.id,
-        ...(image.pdf ? { pdf: { ...image.pdf, id: assets[image.pdf.id] || image.pdf.id } } : {}),
-        ...(image.docx ? { docx: { ...image.docx, id: assets[image.docx.id] || image.docx.id } } : {}),
-      }));
-      copy.draftImages = remap(copy.draftImages);
-      copy.messages = copy.messages.map((m) => ({ ...m, ...(m.images ? { images: remap(m.images) } : {}) }));
+      if (importedId && !fresh) return importedId;
+      const copy = remapAssets(structuredClone(canvas), assets);
+      if (fresh) {
+        copy.id = randomUUID();
+        await save(copy);
+        return copy.id;
+      }
       const existing = await json<Canvas | null>(file("canvases", copy.id), null);
       if (existing && canonical(existing) !== canonical(copy)) copy.id = `import-${fingerprint}`;
       // Deterministic conflict IDs recover a crash between canvas and import receipt.

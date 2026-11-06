@@ -1,6 +1,7 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
+  MiniMap,
   NodeToolbar,
   NodeResizeControl,
   useReactFlow,
@@ -16,15 +17,22 @@ import {
   type Edge,
   type Node,
   type NodeProps,
+  type MiniMapNodeProps,
   type Viewport,
 } from "@xyflow/react";
-import { Palette, Minimize2, Maximize2, RotateCcw } from "lucide-react";
-import { CHATGPT_PLAN, CHATGPT_USAGE_URL } from "../shared/models";
-import type { Canvas, Message } from "../shared/types";
-import { ancestorPath, automaticOffset, CARD_WIDTH, linkKind, visualParent } from "../shared/graph";
+import { FilePlus2, Palette, Minimize2, Maximize2, RotateCcw, Scissors, Unlink } from "lucide-react";
+import { CHATGPT_PLAN, CHATGPT_USAGE_URL, effortLabel } from "../shared/models";
+import type { BubblePreset, Canvas, Message } from "../shared/types";
+import { ancestorPath, automaticOffset, CARD_WIDTH, linkKind, rootIds, visualParent } from "../shared/graph";
+import { validHex } from "../shared/ids";
+import { ColorPicker, isDark } from "./ColorPicker";
+import { MenuItem, Popover, useMenu } from "./Menu";
 import { messageTitle, BUBBLE_COLORS } from "../shared/titles";
 import { Markdown } from "./Markdown";
 import { Thumbnail } from "./images";
+import { FileChips } from "./Files";
+import { WebsiteThumbnail } from "./WebsiteFrame";
+import { extractWebsite } from "../shared/website";
 import { useCanvasGestures } from "./gestures";
 import { useCamera, type CameraRequest } from "./camera";
 import { useForceLayout, type LayoutItem } from "./physics";
@@ -41,8 +49,40 @@ type MessageData = {
   multiple: boolean;
   onResize: (id: string, rect: Rectangle, phase: ResizePhase) => void;
   onAppearance: (id: string, patch: Pick<Message, "color" | "displayMode">) => void;
+  onBranch: (id: string, mode: BranchMode) => void;
 };
 type MessageNodeType = Node<MessageData, "message">;
+// "detach" cuts the branch loose on this canvas; "copy" starts a new canvas from it.
+export type BranchMode = "detach" | "copy";
+
+// Custom colors this workspace saved, newest first.
+type SavedColors = { saved: string[]; onSave: (hex: string) => void };
+const SavedColorsContext = createContext<SavedColors>({ saved: [], onSave: () => {} });
+// What the minimap marks: roots in order, the selected path and each bubble's role.
+type MapMarks = { roots: Map<string, number>; path: Set<string>; roles: Map<string, Message["role"]> };
+const MapMarksContext = createContext<MapMarks>({ roots: new Map(), path: new Set(), roles: new Map() });
+
+function MinimapBubble({ id, x, y, width, height, onClick }: MiniMapNodeProps) {
+  const marks = useContext(MapMarksContext);
+  const root = marks.roots.get(id);
+  const radius = Math.min(width, height) * 0.16;
+  const badge = Math.max(70, Math.min(width, height) * 0.42);
+  return (
+    <g
+      className={`minimap-bubble ${marks.roles.get(id) ?? ""} ${root !== undefined ? "root" : ""} ${marks.path.has(id) ? "on-path" : ""}`}
+      data-minimap-id={id}
+      onClick={onClick ? (event) => onClick(event, id) : undefined}
+    >
+      <rect x={x} y={y} width={width} height={height} rx={radius} ry={radius} />
+      {root !== undefined && (
+        <g className="minimap-root-badge">
+          <circle cx={x} cy={y} r={badge} />
+          <text x={x} y={y} fontSize={badge * 1.15} textAnchor="middle" dominantBaseline="central">{root + 1}</text>
+        </g>
+      )}
+    </g>
+  );
+}
 
 const MessagePreview = memo(function MessagePreview({ content, prompt }: { content: string; prompt: boolean }) {
   const preview = useRef<HTMLDivElement>(null);
@@ -109,12 +149,21 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
     return () => { cancelAnimationFrame(frame); window.clearTimeout(timer); };
   }, [controls]);
   const [swatches, setSwatches] = useState(false);
+  const [custom, setCustom] = useState(false);
+  // A color being dragged in the picker, shown before it is saved.
+  const [preview, setPreview] = useState<string>();
+  const palette = useContext(SavedColorsContext);
+  const branchMenu = useMenu();
   const updateInternals = useUpdateNodeInternals();
   const { message: m } = data;
   const assistant = m.role === "assistant";
   const mode = m.displayMode || "preview";
   useLayoutEffect(() => { updateInternals(m.id); }, [m.id, mode, updateInternals]);
-  useEffect(() => { if (!controls) setSwatches(false); }, [controls]);
+  useEffect(() => { if (!controls) { setSwatches(false); branchMenu.close(); } }, [controls]);
+  useEffect(() => { if (!swatches) setCustom(false); }, [swatches]);
+  const color = preview ?? (m.color ? BUBBLE_COLORS[m.color as BubblePreset] ?? m.color : undefined);
+  const root = !visualParent(m);
+  const website = useMemo(() => (assistant && m.status === "complete" ? extractWebsite(m.content) : undefined), [assistant, m.status, m.content]);
   const size = m.sizes?.[mode];
   const time = m.completedAt ?? m.createdAt;
   return (
@@ -125,7 +174,9 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
       data-status={m.status}
       data-display-mode={mode}
       data-manual-size={!!size}
-      style={{ ...(size ? { width: size.width, height: size.height } : {}), ...(!size && assistant && mode !== "compact" ? { width: CARD_WIDTH } : {}), ...(m.color ? { background: BUBBLE_COLORS[m.color] } : {}) }}
+      style={{ ...(size ? { width: size.width, height: size.height } : {}), ...(!size && assistant && mode !== "compact" ? { width: CARD_WIDTH } : {}), ...(color ? { background: color } : {}) }}
+      data-tone={color && validHex(color) && isDark(color) ? "dark" : undefined}
+      data-root={root || undefined}
       className={`bubble ${assistant ? "answer" : "prompt"} ${m.images?.length ? "with-images" : ""} ${selected ? "selected" : ""}`}
     >
       <Anchors
@@ -158,15 +209,29 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
         }}><span aria-hidden="true" /></button></NodeResizeControl>)}
       <NodeToolbar isVisible={!data.multiple && (!!controls || present)} position={Position.Top} align="end" offset={0}>
         <div data-visible={!!controls && shown} inert={!controls} aria-hidden={!controls} className="bubble-controls nodrag nopan" role="toolbar" aria-label="Bubble appearance" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => {
-          if (e.key === "Escape" && swatches) { e.preventDefault(); e.stopPropagation(); setSwatches(false); }
+          if (e.key === "Escape" && custom) { e.preventDefault(); e.stopPropagation(); setCustom(false); }
+          else if (e.key === "Escape" && swatches) { e.preventDefault(); e.stopPropagation(); setSwatches(false); }
         }}>
           <button className="bubble-control color-control" aria-label="Bubble color" aria-expanded={swatches} onClick={() => setSwatches((v) => !v)}><Palette size={15} /></button>
           <button className="bubble-control compact-control" aria-label="Compact bubble" aria-pressed={mode === "compact"} onClick={() => data.onAppearance(m.id, { displayMode: mode === "compact" ? "preview" : "compact" })}><Minimize2 size={15} /></button>
           <button className="bubble-control expand-control" aria-label="Expand bubble" aria-pressed={mode === "expanded"} onClick={() => data.onAppearance(m.id, { displayMode: mode === "expanded" ? "preview" : "expanded" })}><Maximize2 size={15} /></button>
+          <button className="bubble-control branch-control" aria-label="Branch off" title="Branch off" aria-haspopup="menu" aria-expanded={branchMenu.open} disabled={m.status !== "complete"} onClick={branchMenu.toggle}><Scissors size={15} /></button>
+          {branchMenu.open && <Popover anchor={branchMenu.anchor} onClose={branchMenu.close} label="Branch off" align="end" className="wide">
+            <MenuItem icon={<Unlink size={15} />} disabled={root}
+              hint={root ? "This bubble already starts its own branch" : "Cut this branch loose on this canvas. Replies send only messages from here down"}
+              onSelect={() => { branchMenu.close(); data.onBranch(m.id, "detach"); }}>Continue here</MenuItem>
+            <MenuItem icon={<FilePlus2 size={15} />} hint="Copy this bubble and everything below it to a new canvas, without earlier context"
+              onSelect={() => { branchMenu.close(); data.onBranch(m.id, "copy"); }}>New chat</MenuItem>
+          </Popover>}
           {swatches && <div className="bubble-swatches" role="group" aria-label="Bubble colors">
-            {Object.entries(BUBBLE_COLORS).map(([color, value]) => <button key={color} style={{ background: value }} aria-label={`${color.replace("-", " ")} bubble`} aria-pressed={m.color === color} onClick={() => { data.onAppearance(m.id, { color: color as Message["color"] }); setSwatches(false); }} />)}
+            {Object.entries(BUBBLE_COLORS).map(([preset, value]) => <button key={preset} style={{ background: value }} aria-label={`${preset.replace("-", " ")} bubble`} aria-pressed={m.color === preset} onClick={() => { data.onAppearance(m.id, { color: preset as BubblePreset }); setSwatches(false); }} />)}
             <button aria-label="Reset bubble color" onClick={() => { data.onAppearance(m.id, { color: undefined }); setSwatches(false); }}><RotateCcw size={13} /></button>
+            <button className="custom-swatch" aria-label="Custom bubble color" aria-expanded={custom} aria-pressed={validHex(m.color)}
+              style={validHex(m.color) ? { background: m.color } : undefined} onClick={() => setCustom(v => !v)} />
           </div>}
+          {swatches && custom && <ColorPicker value={validHex(m.color) ? m.color : undefined} saved={palette.saved}
+            onPreview={setPreview} onSave={palette.onSave}
+            onPick={hex => { setPreview(undefined); data.onAppearance(m.id, { color: hex as Message["color"] }); }} />}
         </div>
       </NodeToolbar>
       <div className={`bubble-content ${size ? "nodrag nowheel" : ""}`}>
@@ -179,6 +244,8 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
         </div>
       ) : null}
       {(m.images?.length ?? 0) > 4 && <span className="attachment-count">{m.images!.length} attachments · open reader to view all</span>}
+      {m.files?.length ? <FileChips files={m.files} limit={3} /> : null}
+      {website && <WebsiteThumbnail page={website} />}
       {m.status === "pending" ? (
         <div className="typing" role="status" aria-label="Writing an answer">
           <span />
@@ -233,6 +300,9 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
           {formatTime(time)}
         </time>
       )}
+      {mode !== "compact" && assistant && m.reasoning && (
+        <small className="bubble-thinking">{effortLabel(m.reasoning)} thinking</small>
+      )}
       <Anchors
         type="source"
         sides={[Position.Bottom, Position.Top, Position.Left, Position.Right]}
@@ -253,6 +323,12 @@ type Props = {
   onPlanSettings: (profileId?: string, reconsent?: boolean) => void;
   onPlanReroute: (id: string) => void;
   onAppearance: MessageData["onAppearance"];
+  onBranch: MessageData["onBranch"];
+  // Selects a bubble and brings it into view, as from the minimap.
+  onFocus: (id: string) => void;
+  savedColors: string[];
+  onSaveColor: (hex: string) => void;
+  minimap: boolean;
   onResize: (id: string, size: { width: number; height: number }, position: Point, offset?: Point) => void;
   onLayout: (positions: Map<string, Point>, rebase?: boolean) => void;
   onDrop: (positions: Map<string, Point>, offsets: Map<string, Point>) => void;
@@ -270,13 +346,22 @@ export function Graph({
   onPlanSettings,
   onPlanReroute,
   onAppearance,
+  onBranch,
+  onFocus,
+  savedColors,
+  onSaveColor,
+  minimap,
   onResize,
   onLayout,
   onDrop,
   onViewport,
 }: Props) {
-  const callbacks = useRef({ onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onSelect, onDeselect, onDrop, onViewport, onGroupSelection });
-  callbacks.current = { onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onSelect, onDeselect, onDrop, onViewport, onGroupSelection };
+  const callbacks = useRef({ onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onBranch, onFocus, onSaveColor, onSelect, onDeselect, onDrop, onViewport, onGroupSelection });
+  callbacks.current = { onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onBranch, onFocus, onSaveColor, onSelect, onDeselect, onDrop, onViewport, onGroupSelection };
+  // Stable unless the palette changes, so bubbles don't rerender.
+  const colorsKey = savedColors.join();
+  const swatches = useMemo<SavedColors>(() => ({ saved: savedColors, onSave: hex => callbacks.current.onSaveColor(hex) }), [colorsKey]);
+  const branch = useCallback<MessageData["onBranch"]>((id, mode) => callbacks.current.onBranch(id, mode), []);
   const retry = useCallback((id: string) => callbacks.current.onRetry(id), []);
   const planSettings = useCallback<MessageData["onPlanSettings"]>((...args) => callbacks.current.onPlanSettings(...args), []);
   const planReroute = useCallback((id: string) => callbacks.current.onPlanReroute(id), []);
@@ -327,6 +412,7 @@ export function Graph({
     () => new Map(canvas.messages.map((m) => [m.id, m])),
     [canvas.messages],
   );
+  const roots = useMemo(() => rootIds(canvas), [canvas.messages]);
   const kinds = useMemo(
     () => new Map(canvas.messages.map((m) => [m.id, linkKind(canvas, m)])),
     // linkKind depends only on the messages.
@@ -350,6 +436,11 @@ export function Graph({
     return ids;
   }, [byId, canvas.selectedId]);
 
+  const marks = useMemo<MapMarks>(() => ({
+    roots: new Map(roots.map((id, index) => [id, index])),
+    path: onPath,
+    roles: new Map(canvas.messages.map((m) => [m.id, m.role])),
+  }), [roots, onPath, canvas.messages]);
   const resizeHandler = useRef<MessageData["onResize"]>(() => {});
   const resize = useCallback<MessageData["onResize"]>((...args) => resizeHandler.current(...args), []);
   const messageNodes = (): MessageNodeType[] =>
@@ -361,7 +452,7 @@ export function Graph({
       width: message.sizes?.[message.displayMode || "preview"]?.width,
       height: message.sizes?.[message.displayMode || "preview"]?.height,
       className: "nokey",
-      data: { message, onResize: resize, onRetry: retry, onPlanSettings: planSettings, onPlanReroute: planReroute, onAppearance: appearance, generating, multiple: false },
+      data: { message, onResize: resize, onRetry: retry, onPlanSettings: planSettings, onPlanReroute: planReroute, onAppearance: appearance, onBranch: branch, generating, multiple: false },
     }));
   const [nodes, setNodes] =
     useNodesState<MessageNodeType>(messageNodes());
@@ -420,7 +511,7 @@ export function Graph({
     ids: canvas.messages.map(message => message.id),
     ready: fontsReady && items.length === nodes.length,
     trustRestored: canvas.layout === "force-v2",
-    rootId: canvas.rootId,
+    rootIds: roots,
     selectedId: canvas.selectedId,
     pendingId: canvas.messages.find(m => m.status === "pending")?.id,
     paused: selecting || groupMode,
@@ -581,6 +672,8 @@ export function Graph({
         pointer.current = { x: e.clientX, y: e.clientY };
       }}
     >
+      <SavedColorsContext.Provider value={swatches}>
+      <MapMarksContext.Provider value={marks}>
       <ReactFlow
         nodes={controlledNodes}
         edges={edges}
@@ -626,7 +719,20 @@ export function Graph({
           lineWidth={1}
           color="var(--grid)"
         />
+        {minimap && (
+          <MiniMap
+            className="canvas-minimap"
+            position="top-right"
+            ariaLabel="Minimap. Numbered bubbles start a branch."
+            pannable
+            zoomable
+            nodeComponent={MinimapBubble}
+            onNodeClick={(_event, node) => callbacks.current.onFocus(node.id)}
+          />
+        )}
       </ReactFlow>
+      </MapMarksContext.Provider>
+      </SavedColorsContext.Provider>
     </div>
   );
 }

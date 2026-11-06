@@ -290,12 +290,15 @@ export function createPlanProtocol(fetcher: typeof fetch) {
       for (const model of data.models) {
         if (model?.visibility === "list" && typeof model.slug === "string" && MODEL_ID.test(model.slug) &&
           typeof model.display_name === "string" && model.display_name.trim() && !models.has(model.slug))
-          models.set(model.slug, planModelInfo(model.slug, model.display_name.trim(), profileId));
+          models.set(model.slug, planModelInfo(model.slug, model.display_name.trim(), profileId, model.supported_reasoning_levels, model.default_reasoning_level));
       }
       return [...models.values()];
     },
-    async generate(accessToken: string, model: string, messages: ChatMessage[], signal: AbortSignal) {
-      const body = JSON.stringify({ model, instructions: SYSTEM_PROMPT, input: messages.map(inputMessage), store: false, stream: true });
+    async generate(accessToken: string, model: string, messages: ChatMessage[], signal: AbortSignal, reasoning?: string) {
+      const body = JSON.stringify({
+        model, instructions: SYSTEM_PROMPT, input: messages.map(inputMessage), store: false, stream: true,
+        ...(reasoning ? { reasoning: { effort: reasoning } } : {}),
+      });
       if (Buffer.byteLength(body) > MAX_REQUEST_BYTES)
         throw new ApiError(413, "request_too_large", "This conversation exceeds Canvas’s request limit. Branch from an earlier message or attach fewer images.");
       return streamCompletion(await resource({ path: "/responses", model }, accessToken, signal, body), model, signal);

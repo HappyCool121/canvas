@@ -27,18 +27,23 @@ Visible connectors show each message’s parent: continuations connect bottom to
 
 **Workspace**
 
-- Desktop-first, dark, pannable and zoomable canvas with a subtle grid, draggable message bubbles, and floating top controls (zoom, fit to view, go to root, help).
+- Desktop-first, pannable and zoomable canvas with a subtle grid, draggable message bubbles, and floating top controls (zoom, fit to view, go to root, minimap, help). The collapsible minimap numbers root bubbles and highlights the selected path.
 - A live force layout keeps bubbles apart and arranges them as a mind map. While selected, only that bubble simulates against stationary neighbours; direct dragging moves just the dragged bubble. Deselecting resumes whole-map settling only when needed; a dropped bubble keeps its place relative to its parent. Settled positions are saved, and reopening a canvas does not restart motion.
 - Flat, borderless bubbles with no header or footer: white for prompts, larger grey bubbles for answers, green when selected. Each bubble shows a subtle timestamp in its bottom-left corner.
 - Answer bubbles have bounded Markdown previews. The full content opens in a right-hand reading panel without moving the graph.
 - A collapsible sidebar; the collapsed state is remembered in the local workspace.
 - A context meter anchored bottom-left shows the selected branch’s tokens against the chosen model’s context window (from the bundled models.dev catalog; tokens only when unknown), using the provider’s reported usage where available and an estimate otherwise.
 - Assistant responses support Markdown headings, nested lists, links, blockquotes, tables, inline code, and fenced code blocks. Raw HTML is disabled.
-- The sidebar lists saved canvases and provides “New canvas”.
+- The sidebar lists saved canvases, in folders or in “Your space”, and provides “New canvas” (blank or imported from a JSON export), “New folder”, and per-canvas rename, move and delete (with confirmation). Folders and saved custom colors are workspace preferences.
+- The reading panel expands from its top-left corner into chat mode: the selected branch as a chat over the whole canvas, with the composer still available; the graph keeps rendering behind it.
+- Answers containing an HTML page show a preview in the bubble and the live page in the reader, in a sandboxed frame with scripts allowed and every outside request blocked.
 
 **Conversation behavior**
 
 - Each follow-up sends the root-to-selected-message history plus the new prompt.
+- A canvas may have several roots. “Branch off” cuts a branch loose in place (“Continue here”) or copies it to a new canvas (“New chat”); its context then starts at its top bubble. A branch starting with an answer is preceded by a short user turn.
+- Prompts may carry code and text files, sent inline as fenced blocks before the prompt. Models get no tools.
+- Each answer records the thinking level it requested; “Default” sends none.
 - Sibling branches and messages after the selected message are excluded.
 - Existing messages remain unchanged when new branches are added.
 - One generation runs per canvas at a time.
@@ -51,7 +56,7 @@ Visible connectors show each message’s parent: continuations connect bottom to
 
 - One local server, listening on `127.0.0.1` only, serves the interface and API; provider requests pass through it. API requests for other hostnames or from other origins are refused.
 - **Provider keys (session):** the user connects any number of providers in the app's provider dialog. The server checks each key without inference (DeepSeek's balance, OpenRouter's key endpoint, Vercel's credits, or the model list) and keeps it in process memory until **Disconnect** or a restart. A DeepSeek key that works but has no balance is refused with a distinct message. Each provider's standard variable in `.env` (for example `OPENAI_API_KEY`) connects it at startup. Keys are never returned by the API, stored in the browser, written to disk or logged. Base URLs must be https, except for loopback and private-network servers; entered base URLs are saved, and keyless local servers reconnect at startup. Without a connected provider, prompts can be drafted but not sent; a chat request for a disconnected provider fails with `not_connected` and the answer stays retryable. Disconnect stops that provider's answers in progress.
-- **Requests:** non-streaming Chat Completions with a 4,096-token output cap (16,384 for reasoning models) and a 300-second timeout. DeepSeek receives images through its Files API with thinking disabled; other providers receive them inline. Usage records an estimated cost from catalog list prices, or the provider's reported charge.
+- **Requests:** non-streaming Chat Completions with a 4,096-token output cap (16,384 for reasoning models, or when a thinking level is chosen) and a 300-second timeout. DeepSeek receives images through its Files API with thinking disabled; other providers receive them inline. Usage records an estimated cost from catalog list prices, or the provider's reported charge.
 
 **Storage**
 
@@ -61,7 +66,7 @@ Visible connectors show each message’s parent: continuations connect bottom to
 - Save a prompt and pending answer before requesting inference; visibly report storage failures.
 - The server keeps no transcripts.
 
-**Deferred:** Native (non-OpenAI-compatible) provider APIs, cloud sync, collaboration, non-image attachments, tools, search, branch merging, in-place message editing, response regeneration, and mobile optimization.
+**Deferred:** Native (non-OpenAI-compatible) provider APIs, cloud sync, collaboration, binary non-image attachments, tools, search, branch merging, in-place message editing, response regeneration, showing a model's thinking, and mobile optimization.
 
 ## Acceptance Scenarios
 
@@ -84,6 +89,6 @@ Visible connectors show each message’s parent: continuations connect bottom to
 
 ## Motion and corner resizing
 
-The selected path fades over 550ms with 12px downward entry/upward exit, retaining its contents throughout exit. The 32px color, compact and expand controls animate for 520ms from the bubble’s top-right corner to centers (-28,-28), (+28,-28), (+28,+28) screen pixels. Exiting controls are inert immediately. Reduced motion disables movement/scaling.
+The selected path fades over 550ms with 12px downward entry/upward exit, retaining its contents throughout exit. The 32px color, compact, expand and branch-off controls animate for 520ms from the bubble’s top-right corner onto an arc concentric with its 24px corner (radius 60 screen pixels, at 112.5°, 67.5°, 22.5° and -22.5°): two above the bubble and two beside it. Exiting controls are inert immediately. Reduced motion disables movement/scaling.
 
 Four selected-only lavender corner brackets use React Flow resize controls with touch targets and keyboard arrows (8 units, Shift 32), free axes, fixed opposite corners and a 160 × 72 minimum. Each display mode remembers its own optional rectangle. Live resizing suspends camera/physics, updates edges and leaves neighbours stationary. Release saves the exact size, position and parent offset; deselection permits whole-map settling. Manually sized content reflows and scrolls with timestamps outside the content. The reading panel remains unchanged. Old messages auto-size; canvas version and API routes are unchanged.

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   ArrowUp,
+  Brain,
   Check,
   ChevronDown,
   CircleAlert,
@@ -12,9 +13,10 @@ import {
   X,
 } from "lucide-react";
 import type { Canvas, Message } from "../shared/types";
-import { CHATGPT_PLAN, CHATGPT_USAGE_URL, MODEL_ID, modelKey, unknownModel, type ModelInfo } from "../shared/models";
+import { CHATGPT_PLAN, CHATGPT_USAGE_URL, MODEL_ID, effortLabel, modelKey, unknownModel, type ModelInfo } from "../shared/models";
 import { groupAttachments, isImageFile, MAX_IMAGES, documentLabel, Thumbnail } from "./images";
 import { plainText } from "./Markdown";
+import { FileChips } from "./Files";
 
 const imageFiles = (list: FileList | null | undefined) =>
   [...(list ?? [])].filter(isImageFile);
@@ -36,25 +38,8 @@ function ModelMenu({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const root = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    setQuery("");
-    // Capture first so Escape closes the menu without deselecting the bubble.
-    const key = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setOpen(false);
-    };
-    const pointer = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    window.addEventListener("keydown", key, true);
-    window.addEventListener("pointerdown", pointer, true);
-    return () => {
-      window.removeEventListener("keydown", key, true);
-      window.removeEventListener("pointerdown", pointer, true);
-    };
-  }, [open]);
+  useEffect(() => { if (open) setQuery(""); }, [open]);
+  useDismiss(open, () => setOpen(false), root);
   const search = query.trim().toLowerCase();
   const shown = search
     ? models.filter((m) => `${m.label} ${m.id} ${m.providerName}`.toLowerCase().includes(search))
@@ -131,6 +116,96 @@ function ModelMenu({
   );
 }
 
+// Closes a composer menu on Escape or a click elsewhere. Capture first so
+// Escape closes the menu without deselecting the bubble.
+function useDismiss(open: boolean, close: () => void, root: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    if (!open) return;
+    const key = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close();
+    };
+    const pointer = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) close();
+    };
+    window.addEventListener("keydown", key, true);
+    window.addEventListener("pointerdown", pointer, true);
+    return () => {
+      window.removeEventListener("keydown", key, true);
+      window.removeEventListener("pointerdown", pointer, true);
+    };
+  }, [open]);
+}
+
+const EFFORT_HINTS: Record<string, string> = {
+  none: "No thinking",
+  minimal: "Barely thinks before answering",
+  low: "Quick, light thinking",
+  medium: "Balanced thinking",
+  high: "Thinks longer before answering",
+  xhigh: "Thinks longer than high",
+  max: "Deepest thinking; slowest and costliest",
+  off: "No thinking",
+  on: "Thinks before answering",
+};
+
+// The thinking level for the next answer. "Default" sends no level, so the
+// provider's own default applies; it is named when the provider reports it.
+function ThinkingMenu({ model, level, onLevel }: {
+  model: ModelInfo;
+  level?: string;
+  onLevel: (level?: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  useDismiss(open, () => setOpen(false), root);
+  const current = level ? effortLabel(level) : model.defaultEffort ? effortLabel(model.defaultEffort) : "Default";
+  const choose = (next?: string) => {
+    onLevel(next);
+    setOpen(false);
+  };
+  return (
+    <div className="model-menu thinking-menu" ref={root}>
+      <button
+        type="button"
+        className="model-pill thinking-pill"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Thinking: ${current}`}
+        title="How much the model thinks before answering"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <Brain size={13} />
+        <span>{current}</span>
+        <ChevronDown size={12} />
+      </button>
+      {open && (
+        <div className="model-options thinking-options" role="menu" aria-label="Thinking level">
+          <div className="model-list">
+            <button type="button" role="menuitemradio" aria-checked={!level} onClick={() => choose(undefined)}>
+              <span>
+                <strong>{model.defaultEffort ? `Default · ${effortLabel(model.defaultEffort)}` : "Default"}</strong>
+                <small>{model.defaultEffort ? "The provider’s usual level" : "The provider decides; Canvas sends no level"}</small>
+              </span>
+              {!level && <Check size={14} />}
+            </button>
+            {model.efforts!.filter((option) => option !== model.defaultEffort).map((option) => (
+              <button type="button" role="menuitemradio" key={option} aria-checked={level === option} onClick={() => choose(option)}>
+                <span>
+                  <strong>{effortLabel(option)}</strong>
+                  <small>{EFFORT_HINTS[option] ?? ""}</small>
+                </span>
+                {level === option && <Check size={14} />}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function fitPrompt(field: HTMLTextAreaElement) {
   field.style.height = "";
   field.style.height = `${field.scrollHeight}px`;
@@ -158,9 +233,12 @@ export function Composer({
   onCancelPreparation,
   welcome,
   onRemoveImage,
+  onRemoveFile,
   onCancelEdit,
   onDismissNotice,
   onModel,
+  reasoning,
+  onReasoning,
 }: {
   canvas: Canvas;
   empty: boolean;
@@ -184,9 +262,13 @@ export function Composer({
   onCancelPreparation: () => void;
   welcome: ReactNode;
   onRemoveImage: (id: string) => void;
+  onRemoveFile: (id: string) => void;
   onCancelEdit: () => void;
   onDismissNotice: () => void;
   onModel: (model: ModelInfo) => void;
+  // The chosen thinking level for this model; absent means Default.
+  reasoning?: string;
+  onReasoning: (level?: string) => void;
 }) {
   useLayoutEffect(() => {
     const field = textarea.current;
@@ -222,16 +304,19 @@ export function Composer({
   const fileInput = useRef<HTMLInputElement>(null);
   const [dropping, setDropping] = useState(false);
   const images = canvas.draftImages ?? [];
+  const files = canvas.draftFiles ?? [];
   const editing = Boolean(canvas.editingId);
   const blockedImages = !model.vision && images.length > 0;
   const plan = model.provider === CHATGPT_PLAN;
+  // Nothing to choose from: no provider is connected, or listing models failed.
+  const needsProvider = !connected && models.length === 0;
   const ready =
     connected &&
     !generating &&
     !preparing &&
     !blockedImages &&
     !(plan && !model.vision && branchImages) &&
-    Boolean(canvas.draft.trim() || images.length);
+    Boolean(canvas.draft.trim() || images.length || files.length);
   const hint = blockedImages
     ? `${model.label} can’t see ${images.some((image) => image.docx)
       ? "DOCX pages"
@@ -322,6 +407,7 @@ export function Composer({
             ))}
           </div>
         )}
+        {files.length > 0 && <FileChips files={files} onRemove={onRemoveFile} disabled={preparing} />}
         <textarea
           ref={textarea}
           aria-label="Your prompt"
@@ -353,13 +439,13 @@ export function Composer({
             <button
               type="button"
               className="attach-button"
-              aria-label="Attach images, PDF or DOCX"
+              aria-label="Attach files"
               title={
                 model.vision
-                  ? `Attach up to ${Math.max(0, MAX_IMAGES - branchImages - images.length)} more images or document pages`
-                  : `${model.label} can’t see images. Choose a model that can to attach images or document pages`
+                  ? `Attach code or text files, or up to ${Math.max(0, MAX_IMAGES - branchImages - images.length)} more images or document pages`
+                  : `Attach code or text files. ${model.label} can’t see images or document pages`
               }
-              disabled={preparing || !model.vision || images.length + branchImages >= MAX_IMAGES}
+              disabled={preparing}
               onClick={() => fileInput.current?.click()}
             >
               <Paperclip size={16} />
@@ -367,7 +453,6 @@ export function Composer({
             <input
               ref={fileInput}
               type="file"
-              accept="image/*,.pdf,application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               multiple
               hidden
               onChange={(e) => {
@@ -375,48 +460,55 @@ export function Composer({
                 e.target.value = "";
               }}
             />
-            <ModelMenu
-              models={models}
-              model={model}
-              providers={providers}
-              connected={connected}
-              onModel={onModel}
-            />
-          </div>
-          <span className="attachment-budget">{Math.max(0, MAX_IMAGES - branchImages - images.length)} pages/images · {Math.max(0, 200 - (branchBytes + images.reduce((sum, image) => sum + (image.bytes ?? 0), 0)) / 1024 / 1024).toFixed(1)} MiB available</span>
-          <div className="send-actions">
-            {preparing && (
-              <button type="button" className="attachment-progress" onClick={onCancelPreparation} aria-label="Cancel attachment preparation">
-                {preparationProgress || "Preparing attachments…"} <X size={13} />
-              </button>
-            )}
-            {!connected && (model.provider || models.length === 0) && (
+            {needsProvider ? (
               <button type="button" className="connect-prompt" onClick={onConnect}>
                 <KeyRound size={13} /> Connect a provider to send
               </button>
+            ) : (
+              <>
+                <ModelMenu
+                  models={models}
+                  model={model}
+                  providers={providers}
+                  connected={connected}
+                  onModel={onModel}
+                />
+                {model.efforts?.length ? <ThinkingMenu model={model} level={reasoning} onLevel={onReasoning} /> : null}
+              </>
             )}
-            {hint && (
-              <span className={`model-hint ${blockedImages ? "warn" : ""}`}>
-                {hint}
-              </span>
-            )}
-            <button
-              className="send-button"
-              type="submit"
-              aria-label="Send prompt"
-              disabled={!ready}
-            >
-              {generating ? (
-                <LoaderCircle className="spin" size={17} />
-              ) : (
-                <ArrowUp size={18} />
-              )}
-            </button>
           </div>
+          <button
+            className="send-button"
+            type="submit"
+            aria-label="Send prompt"
+            disabled={!ready}
+          >
+            {generating ? (
+              <LoaderCircle className="spin" size={17} />
+            ) : (
+              <ArrowUp size={18} />
+            )}
+          </button>
         </div>
-        {plan && connected && <p className="plan-route">
-          Using ChatGPT plan <a href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">Manage usage</a>
-        </p>}
+        <div className="composer-notes">
+          {plan && connected && <p className="plan-route">
+            Using ChatGPT plan <a href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">Manage usage</a>
+          </p>}
+          {preparing && (
+            <button type="button" className="attachment-progress" onClick={onCancelPreparation} aria-label="Cancel attachment preparation">
+              {preparationProgress || "Preparing attachments…"} <X size={13} />
+            </button>
+          )}
+          {hint && !needsProvider && (
+            <span className={`model-hint ${blockedImages ? "warn" : ""}`}>
+              {hint}
+            </span>
+          )}
+          {!connected && !needsProvider && model.provider && (
+            <span className="model-hint">{model.label} isn’t connected. Choose another model.</span>
+          )}
+          <span className="attachment-budget">{Math.max(0, MAX_IMAGES - branchImages - images.length)} pages/images · {Math.max(0, 200 - (branchBytes + images.reduce((sum, image) => sum + (image.bytes ?? 0), 0)) / 1024 / 1024).toFixed(1)} MiB available</span>
+        </div>
       </form>
     </div>
   );

@@ -121,6 +121,11 @@ async function deselect(page) {
   });
   await page.mouse.click(point.x, point.y);
 }
+// Bubble controls sit on an arc of radius 60 around the centre of the
+// bubble's 24px top-right corner; offsets are from the corner point.
+const CONTROL_ANGLES = [["Bubble color", 112.5], ["Compact bubble", 67.5], ["Expand bubble", 22.5], ["Branch off", -22.5]];
+const arcOffset = (degrees) => [60 * Math.cos(degrees * Math.PI / 180) - 24, 24 - 60 * Math.sin(degrees * Math.PI / 180)];
+
 async function savedCanvas(page) {
   await page.locator(".save-status").filter({ hasText: "Saving" }).waitFor({ state: "hidden" });
   return page.evaluate(async () => (await (await fetch("/api/workspace")).json()).canvases.sort((a, b) => a.createdAt - b.createdAt));
@@ -423,10 +428,11 @@ test(
         true,
       );
       await page.getByRole("button", { name: "New canvas" }).click();
+      await page.getByRole("menuitem", { name: /Blank canvas/ }).click();
       await page.getByRole("heading", { name: "Canvas", exact: true }).waitFor();
       await page.waitForTimeout(2200);
       assert.equal(await page.locator("[data-message-id]").count(), 0);
-      await page.getByRole("button", { name: /slow-test-background/ }).click();
+      await page.getByRole("button", { name: /^slow-test-background/ }).click();
       await page
         .locator('[data-role="assistant"][data-status="complete"]')
         .waitFor();
@@ -640,8 +646,12 @@ test(
         "images are stored outside canvas snapshots",
       );
 
-      // Path chips navigate back along the branch.
-      await path.getByRole("button").first().click();
+      // Path chips navigate back along the branch; older steps may sit behind the ellipsis.
+      const hidden = path.getByRole("button", { name: /^Show \d+ hidden steps$/ });
+      if (await hidden.count()) {
+        await hidden.click();
+        await page.getByRole("navigation", { name: "Omitted ancestors" }).getByRole("button").first().click();
+      } else await path.getByRole("button").first().click();
       await panel.getByText("Root question, rephrased", { exact: true }).waitFor();
 
       // The sidebar collapses, stays collapsed after reload, and reopens.
@@ -675,12 +685,12 @@ test(
 
       // Errors pop up above the input and can be dismissed.
       await page.locator('input[type="file"]').setInputFiles({
-        name: "notes.txt",
-        mimeType: "text/plain",
-        buffer: Buffer.from("hello"),
+        name: "blob.bin",
+        mimeType: "application/octet-stream",
+        buffer: Buffer.from([0, 159, 146, 150]),
       });
       const notice = page.getByRole("alert").filter({
-        hasText: "Only images, PDFs and DOCX files can be attached.",
+        hasText: "blob.bin isn’t text Canvas can read.",
       });
       await notice.waitFor();
       const noticeBox = await notice.boundingBox();
@@ -712,12 +722,12 @@ test(
         /\d:\d\d/,
       );
 
-      // Switch to V4 Pro: no attaching, a note about branch images, text only.
+      // Switch to V4 Pro: only text files attach, a note about branch images, text only.
       await page.getByRole("button", { name: "Model: DeepSeek Flash" }).click();
       await page.getByRole("menuitemradio", { name: /DeepSeek V4 Pro/ }).click();
-      assert.equal(
-        await page.getByRole("button", { name: "Attach images, PDF or DOCX" }).isDisabled(),
-        true,
+      assert.match(
+        await page.getByRole("button", { name: "Attach files" }).getAttribute("title"),
+        /can’t see images/,
       );
       await page
         .getByText("DeepSeek V4 Pro can’t see the image in this branch")
@@ -892,7 +902,7 @@ for (const engine of ["Chromium", "WebKit"]) {
       assert.equal(await submit.isDisabled(), true);
       await picker.getByRole("button", { name: "Cancel" }).click();
       await picker.waitFor({ state: "hidden" });
-      await page.getByRole("button", { name: "Attach images, PDF or DOCX" }).waitFor();
+      await page.getByRole("button", { name: "Attach files" }).waitFor();
       await page.waitForFunction(() => !document.querySelector(".attach-button").disabled);
       await fileInput.setInputFiles(pdf);
       await picker.getByText("598 image slots remaining.").waitFor();
@@ -1008,13 +1018,14 @@ for (const engine of ["Chromium", "WebKit"]) {
       ));
       assert.ok(!JSON.stringify(snapshot).includes("sk-synthetic-browser-test"));
       await page.getByRole("button", { name: "New canvas" }).click();
+      await page.getByRole("menuitem", { name: /Blank canvas/ }).click();
       await usage.getByText("0", { exact: true }).waitFor();
       await chooseModel("DeepSeek V4 Pro", "DeepSeek Flash");
       await fileInput.setInputFiles({ ...pdf, name: "small.pdf", buffer: await scannedPdf(page, 2) });
       await page.getByText("small.pdf · pages 1, 2", { exact: true }).waitFor();
       await page.getByRole("button", { name: "Remove PDF small.pdf" }).click();
       assert.equal(await page.locator(".pdf-group").count(), 0);
-      await page.getByRole("button", { name: new RegExp(`retry-test-pdf-${engine}`) }).click();
+      await page.getByRole("button", { name: new RegExp(`^retry-test-pdf-${engine}`) }).click();
       await usage.getByText("6,120", { exact: true }).waitFor();
       assert.equal(await slosh.count(), 0, "switching back does not replay a flip");
       await page.route(`**/api/workspace/attachments/${original.id}`, (route) => route.fulfill({ status: 404 }));
@@ -1102,11 +1113,12 @@ for (const engine of ["Chromium", "WebKit"]) {
     const { context, page, errors } = await open(safari);
     try {
       const status = page.locator(".sidebar-save [role=status]");
-      const canvasItems = page.getByRole("navigation", { name: "Saved canvases" }).getByRole("button");
+      const canvasItems = page.getByRole("navigation", { name: "Saved canvases" }).locator(".canvas-open");
       const prompt = page.getByRole("textbox", { name: "Your prompt" });
       const waitStatus = (label) => status.getByText(label, { exact: true }).waitFor();
       await waitStatus("Saved locally");
       await page.getByRole("button", { name: "New canvas" }).click();
+      await page.getByRole("menuitem", { name: /Blank canvas/ }).click();
       await waitStatus("Saved locally");
       await canvasItems.nth(1).click();
 
@@ -1455,10 +1467,11 @@ for (const engine of ["Chromium", "WebKit"]) {
           const color = toolbar.getByRole("button", { name: "Bubble color", exact: true });
           const compact = toolbar.getByRole("button", { name: "Compact bubble", exact: true });
           const expand = toolbar.getByRole("button", { name: "Expand bubble", exact: true });
-          const a = await color.boundingBox(), b = await compact.boundingBox(), c = await expand.boundingBox();
-          assert.ok(Math.abs(a.y - b.y) < 1 && Math.abs(b.x - c.x) < 1, "outer right angle");
+          const [a, b, c, d] = await Promise.all(CONTROL_ANGLES.map(([name]) => toolbar.getByRole("button", { name, exact: true }).boundingBox()));
+          assert.ok(Math.abs(a.y - b.y) < 1 && Math.abs(c.x - d.x) < 1, "two controls above the bubble, two beside it");
           const corner = await answer.boundingBox();
-          for (const [button, dx, dy] of [[a,-28,-28],[b,28,-28],[c,28,28]]) {
+          for (const [button, [, angle]] of [a, b, c, d].map((box, i) => [box, CONTROL_ANGLES[i]])) {
+            const [dx, dy] = arcOffset(angle);
             assert.equal(Math.round(button.width), 32); assert.equal(Math.round(button.height), 32);
             assert.ok(Math.abs(button.x + 16 - corner.x - corner.width - dx) < 1);
             assert.ok(Math.abs(button.y + 16 - corner.y - dy) < 1);
@@ -1640,7 +1653,8 @@ for (const engine of ["Chromium", "WebKit"]) test(`${engine} four-corner pointer
     assert.equal(await answer.getAttribute('data-manual-size'),'false');
     const compactHandle=node.getByRole('button',{name:/Resize bottom-right corner/}); await compactHandle.focus(); await page.keyboard.press('Shift+ArrowRight'); await page.keyboard.press('Shift+ArrowDown');
     const compact=await geometry();
-    await page.getByRole('button',{name:'Expand bubble',exact:true}).click();
+    // The widened bubble sits against the reading panel; use the keyboard.
+    await page.getByRole('button',{name:'Expand bubble',exact:true}).focus(); await page.keyboard.press('Enter');
     assert.equal(await answer.getAttribute('data-manual-size'),'false');
     await node.getByRole('button',{name:/Resize bottom-right corner/}).focus(); await page.keyboard.press('Shift+ArrowRight');
     const expanded=await geometry();
@@ -1701,8 +1715,8 @@ for (const engine of ["Chromium", "WebKit"]) test(`${engine} mobile touch corner
     for(const name of ['zoom in','zoom out','zoom out']) {
       await page.getByRole('button',{name,exact:true}).click(); await page.waitForTimeout(250);
       const corner=await answer.boundingBox();
-      for(const [label,dx,dy] of [['Bubble color',-28,-28],['Compact bubble',28,-28],['Expand bubble',28,28]]) {
-        const button=await page.getByRole('button',{name:label,exact:true}).boundingBox();
+      for(const [label,angle] of CONTROL_ANGLES) {
+        const [dx,dy]=arcOffset(angle), button=await page.getByRole('button',{name:label,exact:true}).boundingBox();
         assert.ok(Math.abs(button.width-32)<.01); assert.ok(Math.abs(button.height-32)<.01);
         assert.ok(Math.abs(button.x+16-corner.x-corner.width-dx)<1);
         assert.ok(Math.abs(button.y+16-corner.y-dy)<1);
@@ -2144,6 +2158,7 @@ for(const engine of ['Chromium','WebKit']) test(`${engine} group selection holds
     assert.deepEqual(await selectedBubbles(page),[promptId,'root'].sort());
     assert.equal(await page.getByRole('textbox',{name:'Your prompt'}).evaluate(e=>e===document.activeElement),false);
     await page.getByRole('button',{name:'New canvas'}).click();
+    await page.getByRole('menuitem',{name:/Blank canvas/}).click();
     await page.locator('.canvas-list .canvas-item').nth(1).click();
     await settled(page);
     assert.deepEqual(await selectedBubbles(page),[promptId]);
@@ -2318,6 +2333,133 @@ test("ChatGPT plan and API keys coexist, and plan retries stay on their saved ac
     assert.doesNotMatch(exported, /mock-(access|refresh|subject)|oaiapp_|urn:uuid|mock@example.test|sk-synthetic-plan-/);
     const answers = JSON.parse(exported).canvas.messages.filter(message => message.role === "assistant");
     assert.deepEqual(answers.map(answer => answer.profileId), [accountA, accountB]);
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("sidebar renames, files into folders, deletes and imports canvases", { timeout: 90_000 }, async () => {
+  const { context, page, errors } = await open();
+  try {
+    await send(page, "Folder canvas", 1);
+    const list = page.getByRole("navigation", { name: "Saved canvases" });
+    const options = () => list.locator(".canvas-item .row-options").first();
+    await options().click();
+    await page.getByRole("menuitem", { name: "Rename" }).click();
+    await list.getByRole("textbox", { name: "Canvas name" }).fill("Renamed canvas");
+    await page.keyboard.press("Enter");
+    await page.locator(".topbar-title strong").filter({ hasText: "Renamed canvas" }).waitFor();
+
+    await page.getByRole("button", { name: "New folder" }).click();
+    await list.getByRole("textbox", { name: "Folder name" }).fill("Work");
+    await page.keyboard.press("Enter");
+    await options().click();
+    await page.getByRole("menuitem", { name: /Move to folder/ }).click();
+    await page.getByRole("menuitem", { name: "Work" }).click();
+    await list.getByRole("group", { name: "Work" }).locator(".canvas-open").filter({ hasText: "Renamed canvas" }).waitFor();
+
+    const download = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export canvas as JSON" }).click();
+    const exported = await (await download).path();
+    await page.getByRole("button", { name: "New canvas" }).click();
+    const chooser = page.waitForEvent("filechooser");
+    await page.getByRole("menuitem", { name: /Import canvas JSON/ }).click();
+    await (await chooser).setFiles(exported);
+    await page.waitForFunction(() => document.querySelectorAll(".canvas-open").length === 2);
+    let saved = await savedCanvas(page);
+    assert.equal(saved.length, 2);
+    assert.equal(new Set(saved.map((c) => c.id)).size, 2, "the import is a new canvas");
+    assert.ok(saved.every((c) => c.title === "Renamed canvas"));
+
+    await options().click();
+    await page.getByRole("menuitem", { name: "Delete" }).click();
+    await page.getByRole("menuitem", { name: "Delete permanently" }).click();
+    await page.waitForFunction(() => document.querySelectorAll(".canvas-open").length === 1);
+    saved = await savedCanvas(page);
+    assert.equal(saved.length, 1);
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("branching off continues on this canvas or starts a new one, and the minimap numbers the roots", { timeout: 90_000 }, async () => {
+  const { context, page, errors } = await open();
+  try {
+    const requests = [];
+    page.on("request", (r) => { if (r.url().endsWith("/api/chat")) requests.push(r.postDataJSON()); });
+    await send(page, "Root question", 1);
+    await send(page, "Second question", 2);
+    let [canvas] = await savedCanvas(page);
+    const second = canvas.messages.find((m) => m.content === "Second question");
+    const rootAnswer = canvas.messages.find((m) => m.role === "assistant" && m.parentId === canvas.rootId);
+    assert.equal(await page.locator(".canvas-minimap").count(), 0, "the minimap starts hidden");
+    await selectMessage(page, second.id);
+    // The control may sit under the reading panel at this zoom; dispatch the click to it.
+    await page.getByRole("button", { name: "Branch off" }).dispatchEvent("click");
+    await page.getByRole("menuitem", { name: /Continue here/ }).click();
+    await page.waitForFunction((id) => !document.querySelector(`.react-flow__edge[data-id$="${id}"], [data-testid="rf__edge-${id}"]`), second.id);
+    [canvas] = await savedCanvas(page);
+    assert.equal(canvas.messages.find((m) => m.id === second.id).parentId, null);
+    await send(page, "Detached follow-up", 3);
+    assert.deepEqual(requests.at(-1).messages.map((m) => m.content).slice(0, 1), ["Second question"], "context starts at the cut");
+
+    const minimap = page.getByRole("button", { name: "Minimap" });
+    await minimap.click();
+    await page.waitForFunction(() => document.querySelectorAll(".minimap-root-badge").length === 2);
+    assert.equal(await minimap.getAttribute("aria-pressed"), "true");
+    await minimap.click();
+    assert.equal(await page.locator(".canvas-minimap").count(), 0);
+
+    await selectMessage(page, rootAnswer.id);
+    await page.getByRole("button", { name: "Branch off" }).dispatchEvent("click");
+    await page.getByRole("menuitem", { name: /New chat/ }).click();
+    await page.locator('.canvas-open[aria-current="page"]').filter({ hasText: "A little room to explore" }).waitFor();
+    assert.equal(await page.locator(".canvas-open").count(), 2);
+    await send(page, "Fresh start", 2);
+    const sent = requests.at(-1).messages;
+    assert.deepEqual(sent.map((m) => m.role), ["user", "assistant", "user"]);
+    assert.equal(sent[0].content, "Continue from this earlier answer.");
+    const all = await savedCanvas(page);
+    assert.equal(all[0].messages.length, 6, "the source canvas keeps its branch");
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("code files go inline, thinking levels are sent, websites render sandboxed, and chat mode continues the branch", { timeout: 90_000 }, async () => {
+  const { context, page, errors } = await open();
+  try {
+    const requests = [];
+    page.on("request", (r) => { if (r.url().endsWith("/api/chat")) requests.push(r.postDataJSON()); });
+    await page.locator('input[type="file"]').setInputFiles({ name: "app.py", mimeType: "text/x-python", buffer: Buffer.from("def hello():\n    return 1\n") });
+    await page.locator(".composer .file-chip").filter({ hasText: "app.py" }).waitFor();
+    await page.getByRole("button", { name: /^Thinking:/ }).click();
+    await page.getByRole("menuitemradio", { name: /^High/ }).click();
+    await send(page, "Explain this file", 1);
+    assert.equal(requests.at(-1).reasoning, "high");
+    assert.match(requests.at(-1).messages[0].content, /^File: app\.py\n```python\ndef hello\(\):/);
+    await page.locator(".bubble-thinking").filter({ hasText: "High thinking" }).waitFor();
+    await page.locator(".bubble .file-chip").filter({ hasText: "app.py" }).waitFor();
+
+    await send(page, "website-test page", 2);
+    await page.locator(".website-thumbnail-frame").waitFor();
+    const panel = page.locator("#reading-panel");
+    await panel.getByRole("tab", { name: "Website" }).waitFor();
+    const frame = page.frameLocator("#reading-panel iframe.website-frame");
+    await frame.locator('h1[data-ran="yes"]').waitFor();
+    assert.equal(await panel.locator("iframe.website-frame").getAttribute("sandbox"), "allow-scripts");
+
+    await page.getByRole("button", { name: "Expand to chat" }).click();
+    assert.equal(await panel.getAttribute("data-expanded"), "true");
+    assert.equal(await page.locator(".chat-turn").count(), 4);
+    await send(page, "A chat turn", 3);
+    await page.locator(".chat-turn.answer.current").filter({ hasText: "A chat turn" }).waitFor();
+    assert.equal(await page.locator(".chat-turn").count(), 6);
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.querySelector("#reading-panel").dataset.expanded === "false");
     assert.deepEqual(errors, []);
   } finally {
     await context.close();

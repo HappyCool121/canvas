@@ -12,6 +12,8 @@ import type { ChatMessage, ProvidersState } from "../shared/types";
 import { MAX_OUTPUT_TOKENS, REASONING_OUTPUT_TOKENS, type ModelInfo } from "../shared/models";
 import { PRESETS, presetById } from "../shared/providers";
 import catalog from "../shared/catalog.json" with { type: "json" };
+import { modelInfo, planModelInfo } from "../server/catalog";
+import { addTurn, newCanvas } from "../shared/graph";
 
 const key = "sk-synthetic-only-not-a-real-key";
 const completion = {
@@ -855,4 +857,99 @@ test("providers without a Files API receive local attachments inline, within the
     assert.match((await tooMuch.json()).error.message, /OpenAI receives images inside each request/);
     assert.equal(received.length, 1);
   } finally { await app.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("thinking levels follow each provider's style; Default sends nothing", async () => {
+  const { calls, fetcher } = recorder(() => answer("Hi"));
+  const hi = [{ role: "user" as const, content: "Hi" }];
+  const body = (i: number) => JSON.parse(calls[i].init.body as string);
+  await adapterFor("openai", fetcher).generate("brand-new", hi, signal(), { reasoning: "high" });
+  assert.equal(body(0).reasoning_effort, "high");
+  assert.equal(body(0).max_completion_tokens, REASONING_OUTPUT_TOKENS, "a chosen level gets room to think");
+  await adapterFor("openrouter", fetcher).generate("vendor/model", hi, signal(), { reasoning: "low" });
+  assert.deepEqual(body(1).reasoning, { effort: "low" });
+  assert.equal(body(1).reasoning_effort, undefined);
+  await adapterFor("anthropic", fetcher).generate("claude-new", hi, signal(), { reasoning: "high" });
+  assert.deepEqual(body(2).thinking, { type: "enabled", budget_tokens: 12288 });
+  assert.ok(body(2).max_tokens > 12288, "the thinking budget stays below the output cap");
+  assert.equal(body(2).reasoning_effort, undefined, "Anthropic ignores reasoning_effort");
+  await adapterFor("deepseek", fetcher).generate("deepseek-flash", hi, signal(), { reasoning: "max" });
+  assert.deepEqual(body(3).thinking, { type: "enabled" });
+  assert.equal(body(3).reasoning_effort, "max");
+  assert.equal(body(3).max_tokens, REASONING_OUTPUT_TOKENS);
+  await adapterFor("deepseek", fetcher).generate("deepseek-flash", hi, signal());
+  assert.deepEqual(body(4).thinking, { type: "disabled" }, "DeepSeek's default stays off");
+  assert.equal(body(4).reasoning_effort, undefined);
+  await adapterFor("groq", fetcher).generate("brand-new", hi, signal());
+  assert.equal(body(5).reasoning_effort, undefined);
+  assert.equal(body(5).reasoning, undefined);
+  assert.equal(body(5).thinking, undefined);
+});
+
+test("a refused thinking level is reported as such; levels are offered by model", async () => {
+  const { fetcher } = recorder(() => Response.json({ error: { message: "Unsupported parameter: 'reasoning_effort' is not supported with this model." } }, { status: 400 }));
+  await assert.rejects(
+    adapterFor("openai", fetcher).generate("gpt-4.1", [{ role: "user", content: "Hi" }], signal(), { reasoning: "high" }),
+    (error: ApiError) => error.code === "reasoning_unsupported",
+  );
+  assert.equal(modelInfo(presetById("openai")!, "gpt-4.1").efforts, undefined, "the catalog says this model doesn't reason");
+  assert.deepEqual(modelInfo(presetById("openai")!, "brand-new").efforts, ["low", "medium", "high"]);
+  assert.deepEqual(modelInfo(presetById("deepseek")!, "deepseek-flash"), { ...modelInfo(presetById("deepseek")!, "deepseek-flash"), efforts: ["low", "high", "max"], defaultEffort: "off" });
+  const plan = planModelInfo("gpt-6.1-sol", "Plan", "profile", [{ effort: "low" }, "high", { effort: "bogus" }], "high");
+  assert.deepEqual([plan.efforts, plan.defaultEffort], [["low", "high"], "high"]);
+});
+
+test("chat passes a valid thinking level to the provider and refuses unknown ones", async () => {
+  const seen: (string | undefined)[] = [];
+  const app = await start({ adapter: () => fake({ generate: async (_model, _messages, _signal, options) => { seen.push(options?.reasoning); return completion; } }) });
+  try {
+    assert.equal((await app.request("/api/chat", "POST", { ...chatBody, reasoning: "high" })).status, 200);
+    assert.equal((await app.request("/api/chat", "POST", { ...chatBody, requestId: "answer-2" })).status, 200);
+    const refused = await app.request("/api/chat", "POST", { ...chatBody, requestId: "answer-3", reasoning: "ultra" });
+    assert.equal(refused.status, 400);
+    assert.equal(await errorCode(refused), "invalid_request");
+    assert.deepEqual(seen, ["high", undefined]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("workspace preferences are checked per key; canvases can be deleted; fresh imports need an intact graph", async () => {
+  const app = await start();
+  try {
+    const prefs = (values: Record<string, string>) => app.request("/api/workspace/preferences", "PUT", { values });
+    const folders = { folders: [{ id: "f1", name: "Work" }], placement: { c1: "f1" }, collapsed: [] };
+    assert.equal((await prefs({ "canvas.folders": JSON.stringify(folders) })).status, 200);
+    assert.equal((await prefs({ "canvas.folders": JSON.stringify({ ...folders, placement: { c1: "missing" } }) })).status, 400);
+    assert.equal((await prefs({ "canvas.colors": JSON.stringify(["#aabbcc"]) })).status, 200);
+    assert.equal((await prefs({ "canvas.colors": JSON.stringify(["red"]) })).status, 400);
+    assert.equal((await prefs({ "canvas.minimap": "closed" })).status, 200);
+    assert.equal((await prefs({ "canvas.minimap": "sometimes" })).status, 400);
+    assert.equal((await prefs({ "canvas.reasoning": JSON.stringify({ "openai/gpt-x": "high" }) })).status, 200);
+    assert.equal((await prefs({ "canvas.reasoning": JSON.stringify({ "openai/gpt-x": "ultra" }) })).status, 400);
+    assert.equal((await prefs({ "canvas.unknown": "x" })).status, 400);
+    assert.equal((await prefs({ toString: "x" })).status, 400, "inherited names are not preferences");
+
+    const canvas = { ...newCanvas(), id: "c1" };
+    assert.equal((await app.request("/api/workspace/canvases/c1", "PUT", canvas)).status, 200);
+    assert.equal((await app.request("/api/workspace/preferences", "PUT", { activeId: "c1" })).status, 200);
+    assert.equal((await app.request("/api/workspace/canvases/c1", "DELETE")).status, 200);
+    const workspace = await (await app.request("/api/workspace")).json();
+    assert.deepEqual(workspace.canvases, []);
+    assert.equal(workspace.activeId, undefined);
+    assert.equal((await app.request("/api/workspace/canvases/c1", "DELETE")).status, 200, "deleting twice is harmless");
+    assert.equal((await app.request("/api/workspace/canvases/..%2Fx", "DELETE")).status, 400);
+
+    const turn = addTurn(newCanvas(), "Imported", null).canvas;
+    const broken = { ...turn, messages: turn.messages.map((m) => (m.role === "assistant" ? { ...m, parentId: "missing" } : m)) };
+    const refused = await app.request("/api/workspace/import", "POST", { canvas: broken, assets: {}, fresh: true });
+    assert.equal(refused.status, 400);
+    assert.equal(await errorCode(refused), "invalid_import");
+    const first = await (await app.request("/api/workspace/import", "POST", { canvas: turn, assets: {}, fresh: true })).json();
+    const second = await (await app.request("/api/workspace/import", "POST", { canvas: turn, assets: {}, fresh: true })).json();
+    assert.notEqual(first.id, turn.id);
+    assert.notEqual(first.id, second.id, "importing the same file twice makes two canvases");
+  } finally {
+    await app.close();
+  }
 });

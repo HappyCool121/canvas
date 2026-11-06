@@ -14,6 +14,16 @@ export type ImageRef = {
   pdf?: DocumentPageRef;
   docx?: DocumentPageRef;
 };
+// A code or text file attached to a prompt. Its bytes live with the other
+// attachments; the text is sent inline, so no tools are involved.
+export type TextFileRef = {
+  id: string;
+  name: string;
+  bytes: number;
+  lines: number;
+};
+export type BubblePreset = "white" | "pale-blue" | "mist" | "lavender" | "coral";
+export type BubbleColor = BubblePreset | `#${string}`;
 export type Usage = {
   promptTokens: number;
   completionTokens: number;
@@ -41,10 +51,13 @@ export type Message = {
   model?: string;
   completedAt?: number;
   images?: ImageRef[];
+  files?: TextFileRef[];
+  // The thinking level requested for an answer; absent means the provider's default.
+  reasoning?: string;
   // The prompt this one rewrites. Visual only: context still follows parentId.
   editOf?: string;
   usage?: Usage;
-  color?: "white" | "pale-blue" | "mist" | "lavender" | "coral";
+  color?: BubbleColor;
   displayMode?: "preview" | "compact" | "expanded";
   sizes?: Partial<Record<"preview" | "compact" | "expanded", { width: number; height: number }>>;
   // Automatic top-left offset; negative y preserves upward pair orientation.
@@ -62,9 +75,12 @@ export type Canvas = {
   rootId: string | null;
   selectedId: string | null;
   readingPanelOpen?: boolean;
+  // The reading panel covers the whole canvas as a chat of the selected branch.
+  readerExpanded?: boolean;
   draft: string;
   draftParentId: string | null;
   draftImages?: ImageRef[];
+  draftFiles?: TextFileRef[];
   editingId?: string | null;
   // Force layout revision used to settle the stored positions.
   layout?: "force" | "force-v2";

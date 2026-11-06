@@ -21,6 +21,7 @@ export function messageTitle(message: Message): string {
   }
   const text = plainTitle(heading || message.content);
   if (text) return text.length > 80 ? `${text.slice(0, 79).trimEnd()}…` : text;
+  if (message.files?.length) return message.files.length === 1 ? message.files[0].name : `${message.files.length} files`;
   if (message.images?.some((i) => i.pdf)) return "PDF attachment";
   if (message.images?.some((i) => i.docx)) return "Word attachment";
   if (message.images?.length) return message.images.length === 1 ? "Image attachment" : `${message.images.length} image attachments`;

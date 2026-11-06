@@ -103,9 +103,14 @@ export function createBrowserRepository(name = "canvas-workspace") {
 
 
 type Workspace = { canvases: Canvas[]; activeId?: string; preferences: Record<string, string> };
+// Explicit database names retain the browser adapter for existing callers/tests.
+export function createRepository(): ReturnType<typeof createApiRepository>;
+export function createRepository(legacyName: string): ReturnType<typeof createBrowserRepository>;
 export function createRepository(legacyName?: string) {
-  // Explicit database names retain the browser adapter for existing callers/tests.
-  if (legacyName) return createBrowserRepository(legacyName);
+  return legacyName ? createBrowserRepository(legacyName) : createApiRepository();
+}
+export type Repository = ReturnType<typeof createApiRepository>;
+function createApiRepository() {
   let queue: Promise<unknown> = Promise.resolve();
   const serial = <T>(work: () => Promise<T>) => {
     const result = queue.catch(() => {}).then(work);
@@ -163,6 +168,17 @@ export function createRepository(legacyName?: string) {
       });
     },
     deleteImage(id: string) { return serial(async () => { await api(`/api/workspace/attachments/${encodeURIComponent(id)}`, { method: "DELETE" }); }); },
+    deleteCanvas(id: string) { return serial(async () => { await api(`/api/workspace/canvases/${encodeURIComponent(id)}`, { method: "DELETE" }); }); },
+    // Stores an exported canvas as a new one. Returns its id and where each
+    // attachment was stored, since an id already in use gets a new one.
+    importExport(canvas: Canvas, entries: { id: string; blob: Blob }[]) {
+      return serial(async () => {
+        const assets: Record<string, string> = {};
+        for (const entry of entries) assets[entry.id] = (await put(entry.id, entry.blob, true)).id;
+        const { id } = await api<{ id: string }>("/api/workspace/import", { method: "POST", body: JSON.stringify({ canvas, assets, fresh: true }) });
+        return { id, assets };
+      });
+    },
     setActive(id: string) { return api<void>("/api/workspace/preferences", { method: "PUT", body: JSON.stringify({ activeId: id }) }); },
     setPreference(key: string, value: string) { return serial(async () => { await api("/api/workspace/preferences", { method: "PUT", body: JSON.stringify({ values: { [key]: value } }) }); }); },
     async close() { await queue.catch(() => {}); },

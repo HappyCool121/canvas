@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { MAX_REQUEST_BYTES } from "../shared/attachments";
-import { MODEL_ID, SYSTEM_PROMPT } from "../shared/models";
+import { MODEL_ID, SYSTEM_PROMPT, THINKING_BUDGETS, thinkingOff } from "../shared/models";
 import type { Preset } from "../shared/providers";
 import type { ChatMessage, Completion, Usage } from "../shared/types";
 import { estimateCost, outputCap } from "./catalog";
@@ -22,13 +22,17 @@ export type ProviderAdapter = {
   // Model ids the provider lists for this key; empty when it doesn't list them.
   listModels(signal: AbortSignal): Promise<string[]>;
   upload?(bytes: Uint8Array, mime: string, signal: AbortSignal): Promise<string>;
-  generate(model: string, messages: ChatMessage[], signal: AbortSignal): Promise<Completion>;
+  generate(model: string, messages: ChatMessage[], signal: AbortSignal, options?: GenerateOptions): Promise<Completion>;
 };
+// A thinking level from REASONING_LEVELS; absent means the provider's default.
+export type GenerateOptions = { reasoning?: string };
 export type ConnectionSettings = { key?: string; baseUrl: string };
 
-async function upstreamError(response: Response, name: string): Promise<never> {
+async function upstreamError(response: Response, name: string, reasoning = false): Promise<never> {
   // Only inspect the upstream error to classify it. Never return or log its raw body.
   const body = await response.text().catch(() => "");
+  if (reasoning && response.status === 400 && /reasoning|thinking|effort/i.test(body))
+    throw new ApiError(400, "reasoning_unsupported", `${name} didn’t accept this thinking level for this model. Choose Default thinking, then retry.`);
   if (response.status === 401 || response.status === 403)
     throw new ApiError(401, "invalid_key", `${name} rejected the API key. Check it and connect again (or fix it in .env).`);
   if (response.status === 402)
@@ -84,6 +88,24 @@ function toProviderMessage({ role, content, images, fileIds }: ChatMessage) {
       ...(images ?? []).map((url) => ({ type: "image_url", image_url: { url } })),
     ],
   };
+}
+
+// The request fields for a chosen thinking level, by the preset's style.
+export function reasoningFields(preset: Preset, level: string | undefined, cap: number): Record<string, unknown> {
+  if (!level) return {};
+  switch (preset.reasoning ?? "effort") {
+    case "openrouter":
+      return { reasoning: thinkingOff(level) ? { enabled: false } : { effort: level } };
+    case "anthropic": {
+      // The budget must be at least 1,024 and below the output cap.
+      const budget = Math.max(1024, Math.min(THINKING_BUDGETS[level] ?? THINKING_BUDGETS.medium, cap - 1024));
+      return { thinking: { type: "enabled", budget_tokens: budget } };
+    }
+    case "deepseek":
+      return thinkingOff(level) ? { thinking: { type: "disabled" } } : { thinking: { type: "enabled" }, reasoning_effort: level };
+    default:
+      return { reasoning_effort: level };
+  }
 }
 
 function authHeaders(preset: Preset, key: string | undefined, purpose: "check" | "chat"): Record<string, string> {
@@ -146,13 +168,15 @@ export function openAICompatible(preset: Preset, { key, baseUrl }: ConnectionSet
         return data.id;
       },
     } : {}),
-    async generate(model, messages, signal) {
+    async generate(model, messages, signal, { reasoning } = {}) {
+      const cap = outputCap(preset, model, reasoning);
       const payload = JSON.stringify({
         model,
         messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages.map(toProviderMessage)],
         stream: false,
-        [preset.maxTokensField ?? "max_tokens"]: outputCap(preset, model),
+        [preset.maxTokensField ?? "max_tokens"]: cap,
         ...preset.extraBody,
+        ...reasoningFields(preset, reasoning, cap),
       });
       if (Buffer.byteLength(payload) > MAX_REQUEST_BYTES) throw new ApiError(413, "request_too_large", "The conversation exceeds Canvas’s 48 MiB request limit. Branch from an earlier message or attach fewer images.");
       const response = await call("/chat/completions", {
@@ -161,7 +185,7 @@ export function openAICompatible(preset: Preset, { key, baseUrl }: ConnectionSet
         headers: { ...authHeaders(preset, key, "chat"), "Content-Type": "application/json" },
         body: payload,
       });
-      if (!response.ok) { if ([400, 404].includes(response.status)) files.clear(); await upstreamError(response, name); }
+      if (!response.ok) { if ([400, 404].includes(response.status)) files.clear(); await upstreamError(response, name, Boolean(reasoning)); }
       const data = await response.json();
       const choice = data.choices?.[0];
       const raw = choice?.message?.content;

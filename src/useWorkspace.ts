@@ -1,4 +1,6 @@
-import { AttachmentLimitError, checkImageBudget, MAX_IMAGE_BYTES } from "../shared/attachments";
+import { AttachmentLimitError, checkImageBudget, MAX_IMAGE_BYTES, MAX_TEXT_FILE_BYTES, MAX_TEXT_FILES, remapAssets, TEXT_MIME } from "../shared/attachments";
+import { countLines, decodeText, withFiles } from "../shared/files";
+import { COLORS_KEY, FOLDERS_KEY, MAX_SAVED_COLORS, parseColors, parseFolders, type Folders } from "../shared/folders";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   addTurn,
@@ -8,6 +10,8 @@ import {
   requestHistory,
   withoutImages,
   ancestorPath,
+  copyBranch,
+  detachBranch,
 } from "../shared/graph";
 import { CHATGPT_PLAN, LEGACY_MODEL, LEGACY_PROVIDER, type ModelInfo } from "../shared/models";
 import type {
@@ -15,10 +19,12 @@ import type {
   ChatMessage,
   Completion,
   ImageRef,
+  TextFileRef,
 } from "../shared/types";
-import { createRepository } from "./storage";
+import { createRepository, type Repository } from "./storage";
 import { api } from "./api";
 import { downloadCanvas } from "./exportCanvas";
+import { readExport } from "./importCanvas";
 import type { PageSelection } from "./DocumentPages";
 import {
   documentPage,
@@ -34,6 +40,8 @@ export function useWorkspace(models: ModelInfo[]) {
   const [canvases, setCanvases] = useState<Canvas[]>([]);
   const [activeId, setActiveId] = useState<string>("");
   const [preferences, setPreferences] = useState<Record<string, string>>({});
+  // Read synchronously by changes that build on the latest preference value.
+  const preferencesRef = useRef<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [saveStates, setSaveStates] = useState<Record<string, { saving: boolean; error?: string }>>({});
@@ -46,7 +54,7 @@ export function useWorkspace(models: ModelInfo[]) {
   const [chatRequest, setChatRequest] = useState<{ canvasId: string; sequence: number }>();
   const preparation = useRef<{ canvasId: string; controller: AbortController } | undefined>(undefined);
   const data = useRef<Canvas[]>([]);
-  const repository = useRef<ReturnType<typeof createRepository> | null>(null);
+  const repository = useRef<Repository | null>(null);
   const busy = useRef(new Set<string>());
   const groupSelection = useRef(new Set<string>());
   const setGroupSelection = useCallback((canvasId: string, active: boolean) => {
@@ -78,6 +86,7 @@ export function useWorkspace(models: ModelInfo[]) {
             ? stored.activeId!
             : restored[0].id,
         );
+        preferencesRef.current = stored.preferences;
         setPreferences(stored.preferences);
         setLoading(false);
       } catch (error) {
@@ -166,7 +175,8 @@ export function useWorkspace(models: ModelInfo[]) {
     const used = new Set(
       data.current.flatMap((c) => [
         ...assetIds(c.draftImages),
-        ...c.messages.flatMap((m) => assetIds(m.images)),
+        ...(c.draftFiles ?? []).map((file) => file.id),
+        ...c.messages.flatMap((m) => [...assetIds(m.images), ...(m.files ?? []).map((file) => file.id)]),
       ]),
     );
     for (const id of ids) {
@@ -198,10 +208,19 @@ export function useWorkspace(models: ModelInfo[]) {
       // Models the catalog doesn't describe may see images; the provider decides.
       const vision = provider === CHATGPT_PLAN || (modelList.current.find((m) => m.provider === provider && m.id === model)?.vision ?? true);
       const history = requestHistory(canvas, answerId);
+      // Files travel as text inside their prompt, so every model can read them.
+      const readFile = async (file: TextFileRef) => {
+        const blob = await repository.current!.getImage(file.id, controller.signal);
+        if (!blob) throw new Error(`${file.name} is missing from local storage. Attach it again in a new prompt.`);
+        return { name: file.name, text: await blob.text() };
+      };
       const messages: ChatMessage[] = await Promise.all(
         (vision ? history : withoutImages(history)).map(
-          async ({ images, ...m }) =>
-            images ? { ...m, attachmentIds: images.map(image => image.id) } : m,
+          async ({ images, files, ...m }) => ({
+            ...m,
+            ...(files?.length ? { content: withFiles(m.content, await Promise.all(files.map(readFile))) } : {}),
+            ...(images ? { attachmentIds: images.map(image => image.id) } : {}),
+          }),
         ),
       );
       if (controller.signal.aborted || unloading.current) return;
@@ -215,6 +234,7 @@ export function useWorkspace(models: ModelInfo[]) {
           provider,
           model,
           profileId: answer?.profileId,
+          ...(answer?.reasoning ? { reasoning: answer.reasoning } : {}),
           messages,
         }),
       });
@@ -230,8 +250,10 @@ export function useWorkspace(models: ModelInfo[]) {
           errorCode: undefined,
         });
         // Don't replace a parent the user deliberately selected during generation.
+        // Chat mode always follows the answer, as a chat continues from it.
         const promptId = c.messages.find((m) => m.id === answerId)?.parentId;
-        return c.selectedId === promptId && !c.draft && !groupSelection.current.has(canvasId)
+        const chatting = c.readerExpanded && c.readingPanelOpen !== false;
+        return c.selectedId === promptId && (!c.draft || chatting) && !groupSelection.current.has(canvasId)
           ? { ...completed, selectedId: answerId, draftParentId: answerId }
           : completed;
       });
@@ -257,6 +279,8 @@ export function useWorkspace(models: ModelInfo[]) {
     model: ModelInfo,
     onTurn: (ids: string[], first: boolean) => void,
     geometry?: Record<string, import("../shared/graph").PlacementRect>,
+    // The thinking level for this answer; absent leaves it to the provider.
+    reasoning?: string,
   ) {
     if (busy.current.has(canvasId) || preparation.current?.canvasId === canvasId) return;
     busy.current.add(canvasId);
@@ -267,10 +291,12 @@ export function useWorkspace(models: ModelInfo[]) {
         throw new Error(`${model.label} can’t see images or document pages. Choose a model that can.`);
       const turn = addTurn(current, text, parentId, {
         images: current.draftImages,
+        files: current.draftFiles,
         editOf: current.editingId ?? undefined,
         model: model.id,
         provider: model.provider,
         profileId: model.profileId,
+        reasoning: reasoning && model.efforts?.includes(reasoning) ? reasoning : undefined,
         geometry,
       });
       const saved = commit(turn.canvas);
@@ -311,14 +337,18 @@ export function useWorkspace(models: ModelInfo[]) {
       !(await update(canvasId, (c) =>
         patchMessage(c, answerId, {
           status: "pending", error: undefined, errorCode: undefined,
-          ...(route ? { provider: route.provider, model: route.id, profileId: route.profileId } : {}),
+          ...(route ? {
+            provider: route.provider, model: route.id, profileId: route.profileId,
+            // A level the new route doesn't offer falls back to its default.
+            reasoning: answer.reasoning && route.efforts?.includes(answer.reasoning) ? answer.reasoning : undefined,
+          } : {}),
         }),
       ))
     ) {
       await update(canvasId, (c) =>
         patchMessage(c, answerId, {
           status: "error",
-          provider: answer.provider, model: answer.model, profileId: answer.profileId,
+          provider: answer.provider, model: answer.model, profileId: answer.profileId, reasoning: answer.reasoning,
           error:
             "Local storage is still unavailable. No inference request was sent.",
         }),
@@ -351,7 +381,7 @@ export function useWorkspace(models: ModelInfo[]) {
   // Leaving edit mode discards the pre-filled edit, never the original prompt.
   function withoutEdit(c: Canvas): Canvas {
     return c.editingId
-      ? { ...c, editingId: null, draft: "", draftImages: [] }
+      ? { ...c, editingId: null, draft: "", draftImages: [], draftFiles: [] }
       : c;
   }
   async function changeDraft(
@@ -363,7 +393,7 @@ export function useWorkspace(models: ModelInfo[]) {
     const next = transform(current);
     if (current.editingId !== next.editingId && preparation.current?.canvasId === canvasId)
       cancelPreparation();
-    if (await commit(next)) releaseImages(assetIds(current.draftImages));
+    if (await commit(next)) releaseImages([...assetIds(current.draftImages), ...(current.draftFiles ?? []).map((file) => file.id)]);
   }
   function selectMessage(canvasId: string, messageId: string) {
     void changeDraft(canvasId, (c) => {
@@ -394,24 +424,71 @@ export function useWorkspace(models: ModelInfo[]) {
         draftParentId: prompt.id,
         draft: prompt.content,
         draftImages: prompt.images ?? [],
+        draftFiles: prompt.files ?? [],
       };
     });
   }
   function cancelEdit(canvasId: string) {
     void changeDraft(canvasId, withoutEdit);
   }
+  // Code and text files: read as UTF-8, kept with the other attachments and
+  // sent inline. Returns false when nothing else should be attached.
+  async function attachText(canvasId: string, files: File[]) {
+    const current = data.current.find((c) => c.id === canvasId)!;
+    const room = MAX_TEXT_FILES - (current.draftFiles?.length ?? 0);
+    if (files.length > room) {
+      setNotice(room > 0 ? `A prompt can carry ${MAX_TEXT_FILES} files. There is room for ${room} more.` : `A prompt can carry at most ${MAX_TEXT_FILES} files.`);
+      return false;
+    }
+    const large = files.find((file) => file.size > MAX_TEXT_FILE_BYTES);
+    if (large) {
+      setNotice(`${large.name} is larger than 1 MiB. Attach a smaller file, or paste the part you need.`);
+      return false;
+    }
+    const refs: TextFileRef[] = [];
+    const assets: { id: string; blob: Blob }[] = [];
+    const unreadable: string[] = [];
+    for (const file of files) {
+      const text = decodeText(await file.arrayBuffer());
+      if (text === undefined) { unreadable.push(file.name); continue; }
+      const blob = new Blob([text], { type: TEXT_MIME });
+      const id = crypto.randomUUID();
+      refs.push({ id, name: file.name.slice(0, 200), bytes: blob.size, lines: countLines(text) });
+      assets.push({ id, blob });
+    }
+    if (unreadable.length)
+      setNotice(`${unreadable.join(", ")} ${unreadable.length === 1 ? "isn’t" : "aren’t"} text Canvas can read. Attach images, PDFs, DOCX, or code and text files.`);
+    if (!assets.length) return true;
+    try {
+      await repository.current!.putAttachments(assets);
+    } catch {
+      setNotice("Files couldn’t be saved. Free disk space or check Canvas folder permissions and attach them again.");
+      return false;
+    }
+    if (!(await update(canvasId, (c) => ({ ...c, draftFiles: [...(c.draftFiles ?? []), ...refs] })))) {
+      setNotice("The attachment draft couldn’t be saved. Free disk space or check Canvas folder permissions and choose Try saving again before reloading.");
+      return false;
+    }
+    return true;
+  }
   async function attachFiles(canvasId: string, files: File[], vision: boolean) {
     if (!files.length || preparation.current) return;
     setNotice("");
     const current = data.current.find((c) => c.id === canvasId);
     if (!current) return;
+    const docxMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    const isDocx = (file: File) => file.type === docxMime || /\.docx$/i.test(file.name);
+    const isDocument = (file: File) => isDocx(file) || file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+    // Anything that isn't an image or document is tried as text.
+    const texts = files.filter((file) => !isDocument(file) && !isImageFile(file));
+    if (texts.length && !(await attachText(canvasId, texts))) return;
+    files = files.filter((file) => !texts.includes(file));
+    if (!files.length) return;
     if (!vision) {
       setNotice("Choose a model that sees images to attach images or document pages.");
       return;
     }
-    const docxMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-    const isDocx = (file: File) => file.type === docxMime || /\.docx$/i.test(file.name);
-    const documents = files.filter((file) => isDocx(file) || file.type === "application/pdf" || /\.pdf$/i.test(file.name));
+    const documents = files.filter(isDocument);
     const images = files.filter((file) => !documents.includes(file) && isImageFile(file));
     if (documents.length > 1) {
       setNotice("Attach one PDF or DOCX at a time.");
@@ -423,8 +500,6 @@ export function useWorkspace(models: ModelInfo[]) {
       setNotice("Each image must be 64 MiB or smaller. Try a smaller copy.");
       return;
     }
-    if (images.length + documents.length < files.length)
-      setNotice("Only images, PDFs and DOCX files can be attached.");
     const contextId = current.editingId ? current.messages.find(m => m.id === current.editingId)?.parentId ?? null : current.draftParentId;
     const previous = [...ancestorPath(current, contextId).flatMap(m => m.images ?? []), ...(current.draftImages ?? [])];
     const room = MAX_IMAGES - previous.length;
@@ -538,6 +613,9 @@ export function useWorkspace(models: ModelInfo[]) {
       setPageSelection(undefined);
     }
   }
+  function removeDraftFile(canvasId: string, id: string) {
+    void changeDraft(canvasId, (c) => ({ ...c, draftFiles: (c.draftFiles ?? []).filter((file) => file.id !== id) }));
+  }
   function removeDraftImage(canvasId: string, id: string) {
     void changeDraft(canvasId, (c) => ({
       ...c,
@@ -553,11 +631,130 @@ export function useWorkspace(models: ModelInfo[]) {
     if (current) return commit(current);
   }
   const setPreference = useCallback((key: string, value: string) => {
-    setPreferences((previous) => ({ ...previous, [key]: value }));
+    preferencesRef.current = { ...preferencesRef.current, [key]: value };
+    setPreferences(preferencesRef.current);
     void repository.current?.setPreference(key, value).catch(() => setPreferenceError("Could not save workspace preferences. Try again."));
   }, []);
 
+  // Deletes a canvas file; its folder placement goes with it.
+  async function deleteCanvas(id: string) {
+    const canvas = data.current.find((c) => c.id === id);
+    if (!canvas) return;
+    if (busy.current.has(id) || canvas.messages.some((m) => m.status === "pending")) {
+      setNotice("Wait for the answer on this canvas to finish, then delete it.");
+      return;
+    }
+    if (preparation.current?.canvasId === id) cancelPreparation();
+    try {
+      await repository.current!.deleteCanvas(id);
+    } catch (error) {
+      setNotice((error as Error).message || "This canvas couldn’t be deleted. Check the Canvas folder permissions, then try again.");
+      return;
+    }
+    latestSave.current.delete(id);
+    data.current = data.current.filter((c) => c.id !== id);
+    setCanvases(data.current);
+    changeFolders((f) => {
+      if (!(id in f.placement)) return f;
+      const { [id]: _removed, ...placement } = f.placement;
+      return { ...f, placement };
+    });
+    if (id !== activeId) return;
+    const next = [...data.current].sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (next) selectCanvas(next.id); else createCanvas();
+  }
+  function renameCanvas(id: string, title: string) {
+    const name = title.replace(/\s+/g, " ").trim().slice(0, 120);
+    if (name) void update(id, (c) => (c.title === name ? c : { ...c, title: name, updatedAt: Date.now() }));
+  }
+  // Folders are a workspace preference; canvases outside one sit in "Your space".
+  function changeFolders(change: (folders: Folders) => Folders) {
+    const current = parseFolders(preferencesRef.current[FOLDERS_KEY]);
+    const next = change(current);
+    if (next !== current) setPreference(FOLDERS_KEY, JSON.stringify(next));
+  }
+  function createFolder(name = "New folder") {
+    const id = crypto.randomUUID();
+    changeFolders((f) => (f.folders.length >= 100 ? f : { ...f, folders: [...f.folders, { id, name }] }));
+    return id;
+  }
+  function renameFolder(id: string, name: string) {
+    const clean = name.replace(/\s+/g, " ").trim().slice(0, 60);
+    if (clean) changeFolders((f) => ({ ...f, folders: f.folders.map((folder) => (folder.id === id ? { ...folder, name: clean } : folder)) }));
+  }
+  // Removes the folder only; its canvases move back to "Your space".
+  function deleteFolder(id: string) {
+    changeFolders((f) => ({
+      folders: f.folders.filter((folder) => folder.id !== id),
+      placement: Object.fromEntries(Object.entries(f.placement).filter(([, folder]) => folder !== id)),
+      collapsed: f.collapsed.filter((folder) => folder !== id),
+    }));
+  }
+  function moveCanvas(canvasId: string, folderId: string | null) {
+    changeFolders((f) => {
+      const { [canvasId]: _previous, ...placement } = f.placement;
+      return { ...f, placement: folderId && f.folders.some((folder) => folder.id === folderId) ? { ...placement, [canvasId]: folderId } : placement };
+    });
+  }
+  function toggleFolder(id: string) {
+    changeFolders((f) => ({ ...f, collapsed: f.collapsed.includes(id) ? f.collapsed.filter((folder) => folder !== id) : [...f.collapsed, id] }));
+  }
+  // Custom bubble colors, newest first.
+  function saveColor(hex: string) {
+    const color = hex.toLowerCase();
+    const colors = parseColors(preferencesRef.current[COLORS_KEY]);
+    setPreference(COLORS_KEY, JSON.stringify([color, ...colors.filter((c) => c !== color)].slice(0, MAX_SAVED_COLORS)));
+  }
+  // Opens a Canvas JSON export as a new canvas.
+  async function importFile(file: File) {
+    setNotice("");
+    try {
+      const { canvas, entries } = await readExport(file);
+      const { id, assets } = await repository.current!.importExport(canvas, entries);
+      const imported = recoverCanvas({ ...remapAssets(canvas, assets), id });
+      if (!(await commit(imported))) throw new Error("The imported canvas couldn’t be saved. Free disk space or check Canvas folder permissions.");
+      selectCanvas(id);
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
+  }
+  // "Continue here" cuts the branch loose on this canvas; "New chat" copies it to
+  // a new canvas in the same folder. Either way context starts at its top bubble.
+  async function branchOff(canvasId: string, messageId: string, mode: "detach" | "copy") {
+    const current = data.current.find((c) => c.id === canvasId);
+    if (!current) return;
+    setNotice("");
+    try {
+      if (mode === "detach") {
+        await update(canvasId, (c) => detachBranch(c, messageId));
+        return;
+      }
+      const copy = copyBranch(current, messageId);
+      // Open it right away, as a new canvas does; the sidebar reports a failed save.
+      const saved = commit(copy);
+      const folder = parseFolders(preferencesRef.current[FOLDERS_KEY]).placement[canvasId];
+      if (folder) moveCanvas(copy.id, folder);
+      selectCanvas(copy.id);
+      if (!(await saved)) setNotice("The new canvas couldn’t be saved. Free disk space or check Canvas folder permissions, then choose Try saving again.");
+      return copy;
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
+  }
+
   return {
+    folders: parseFolders(preferences[FOLDERS_KEY]),
+    savedColors: parseColors(preferences[COLORS_KEY]),
+    deleteCanvas,
+    renameCanvas,
+    createFolder,
+    renameFolder,
+    deleteFolder,
+    moveCanvas,
+    toggleFolder,
+    saveColor,
+    importFile,
+    branchOff,
     preferences,
     setPreference,
     canvases,
@@ -585,6 +782,7 @@ export function useWorkspace(models: ModelInfo[]) {
     chatRequest,
     exportCanvas,
     removeDraftImage,
+    removeDraftFile,
     loadImage,
     retrySave,
     dismissNotice: () => setNotice(""),

@@ -6,13 +6,14 @@ import {
   CircleHelp,
   Focus,
   Home,
+  Map as MapIcon,
   Minus,
   PanelLeftOpen,
   Pencil,
   Plus,
 } from "lucide-react";
 import type { Canvas, Message } from "../shared/types";
-import { ancestorPath } from "../shared/graph";
+import { ancestorPath, rootIds, rootOf } from "../shared/graph";
 import { messageTitle } from "../shared/titles";
 
 function PathFlow({ canvas, onPick }: { canvas: Canvas; onPick: (id: string) => void }) {
@@ -84,12 +85,16 @@ export function TopBar({
   sidebarCollapsed,
   onShowSidebar,
   onSelect,
+  minimap,
+  onMinimap,
 }: {
   canvas: Canvas;
   empty: boolean;
   sidebarCollapsed: boolean;
   onShowSidebar: () => void;
   onSelect: (id: string) => void;
+  minimap: boolean;
+  onMinimap: () => void;
 }) {
   const flow = useReactFlow();
   const lastPath = useRef(canvas);
@@ -159,10 +164,23 @@ export function TopBar({
               <button
                 className="icon-button"
                 aria-label="Go to root"
-                title="Go to root"
-                onClick={() => canvas.rootId && onSelect(canvas.rootId)}
+                title="Go to the root of this branch"
+                onClick={() => {
+                  // The selected branch's own root, else the first root.
+                  const root = (canvas.selectedId && rootOf(canvas, canvas.selectedId)) || rootIds(canvas)[0];
+                  if (root) onSelect(root);
+                }}
               >
                 <Home size={16} />
+              </button>
+              <button
+                className="icon-button"
+                aria-label="Minimap"
+                aria-pressed={minimap}
+                title={minimap ? "Hide the minimap" : "Show the minimap"}
+                onClick={onMinimap}
+              >
+                <MapIcon size={16} />
               </button>
               <span className="topbar-divider" />
             </>
@@ -190,6 +208,11 @@ export function TopBar({
             toggles a bubble in the group. Drag any selected bubble to move the group.
             Group selection keeps your reader and reply target. Scroll to pan, pinch or use
             − / + to zoom. Edit a prompt from the reading panel to rewrite it.
+          </p>
+          <p>
+            The scissors on a selected bubble branch off: continue here as a new root, or
+            copy the branch to a new chat. The map button shows numbered roots. Expand the
+            reading panel from its top-left corner to chat with the selected branch.
           </p>
           <button onClick={() => setHelp(false)}>
             Got it <Check size={13} />
