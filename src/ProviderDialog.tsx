@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUpRight, KeyRound, LoaderCircle, Sparkles, X } from "lucide-react";
 import { api } from "./api";
-import type { ProvidersState } from "../shared/types";
+import type { PlanIssue, ProvidersState } from "../shared/types";
 import type { Preset } from "../shared/providers";
+import { CHATGPT_USAGE_URL } from "../shared/models";
+import { ChatGPTPlanSettings, PLAN_PATH } from "./ChatGPTPlanSettings";
 
 const SOURCE = { env: "from .env", session: "this session", saved: "local, remembered" };
 const placeholder = (url: string) => /\{[^}]*\}/.test(url);
@@ -11,12 +13,20 @@ export function ProviderDialog({
   state,
   onChange,
   onClose,
+  onRefreshModels,
+  catalogIssue,
+  recovery,
 }: {
   state: ProvidersState;
   onChange: (s: ProvidersState) => void;
   onClose: () => void;
+  onRefreshModels: () => void;
+  catalogIssue?: PlanIssue;
+  recovery?: { profileId?: string; reconsent?: boolean };
 }) {
-  const connected = new Set(state.connected.map((c) => c.id));
+  const keyConnections = state.connected.flatMap(c => c.source === "plan" ? [] : [{ ...c, source: c.source }]);
+  const connected = new Set(keyConnections.map(c => c.id));
+  const welcomeId = state.chatGPTPlan?.welcomeId;
   const [presetId, setPresetId] = useState(
     () => state.presets.find((p) => !connected.has(p.id))?.id ?? state.presets[0]?.id ?? "",
   );
@@ -29,7 +39,7 @@ export function ProviderDialog({
   const [error, setError] = useState("");
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    input.current?.focus();
+    input.current?.focus({ preventScroll: true });
   }, [presetId]);
   useEffect(() => {
     // Capture first so Escape closes the dialog without deselecting the bubble
@@ -37,11 +47,11 @@ export function ProviderDialog({
     const key = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      if (!busy) onClose();
+      if (!busy && !welcomeId) onClose();
     };
     window.addEventListener("keydown", key, true);
     return () => window.removeEventListener("keydown", key, true);
-  }, [busy, onClose]);
+  }, [busy, onClose, welcomeId]);
   async function request(path: string, init: RequestInit) {
     setBusy(true);
     setError("");
@@ -57,6 +67,18 @@ export function ProviderDialog({
   }
   const showBaseUrl = Boolean(preset && (preset.editableBaseUrl || preset.baseUrlChoices));
   const groups = [...new Set(state.presets.map((p) => p.group))];
+  if (welcomeId) return (
+    <div className="modal-backdrop">
+      <section className="provider-dialog plan-welcome" role="dialog" aria-modal="true" aria-labelledby="provider-title">
+        <h2 id="provider-title">You’re using your ChatGPT plan</h2>
+        <p>Eligible requests on this route use your ChatGPT plan. <a href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">Manage usage</a> in ChatGPT settings.</p>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <button type="button" className="primary" autoFocus disabled={busy} onClick={() => void request(`${PLAN_PATH}/welcome`, {
+          method: "POST", body: JSON.stringify({ profileId: welcomeId }),
+        })}>Got it</button>
+      </section>
+    </div>
+  );
   return (
     <div
       className="modal-backdrop"
@@ -84,9 +106,11 @@ export function ProviderDialog({
         <span className="eyebrow">YOUR MODELS, YOUR KEYS</span>
         <h2 id="provider-title">Connect a provider.</h2>
         <p>Bring an API key from any provider below, or point Canvas at a local or OpenAI-compatible server. Each provider bills your own account.</p>
-        {state.connected.length > 0 && (
+        {state.chatGPTPlan && <ChatGPTPlanSettings key={recovery?.profileId} plan={state.chatGPTPlan} catalogIssue={catalogIssue}
+          recovery={recovery} onChange={onChange} onRefreshModels={onRefreshModels} />}
+        {keyConnections.length > 0 && (
           <ul className="connected-providers" aria-label="Connected providers">
-            {state.connected.map((c) => (
+            {keyConnections.map((c) => (
               <li key={c.id}>
                 <span className="status-dot online" />
                 <span>

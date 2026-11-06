@@ -6,7 +6,9 @@ import type { ChatMessage, ProviderConnection, ProvidersState } from "../shared/
 import { ApiError, openAICompatible, type ConnectionSettings, type ProviderAdapter } from "./provider";
 import { catalogIds, modelInfo } from "./catalog";
 import type { EnvConnection } from "./config";
-import { LEGACY_MODEL, LEGACY_PROVIDER, MODEL_ID } from "../shared/models";
+import { CHATGPT_PLAN, LEGACY_MODEL, LEGACY_PROVIDER, MODEL_ID } from "../shared/models";
+import { planIssue, type ChatGPTPlan } from "./chatgpt-plan";
+import { RESOURCE, revoked } from "./chatgpt-plan/protocol";
 import { PRESETS, presetById, unfinishedBaseUrl, type Preset } from "../shared/providers";
 
 const MAX_IMAGES_PER_MESSAGE = MAX_IMAGES;
@@ -71,6 +73,7 @@ type Options = {
   connections?: EnvConnection[];
   timeoutMs?: number;
   dataDir?: string;
+  chatGPTPlan?: ChatGPTPlan;
 };
 export function createApp({
   fetcher = fetch,
@@ -78,11 +81,12 @@ export function createApp({
   connections: initial = [],
   timeoutMs = 300_000,
   dataDir,
+  chatGPTPlan,
 }: Options = {}) {
   const app = express();
   app.disable("x-powered-by");
   const workspace = createWorkspace(dataDir);
-  const active = new Map<string, { controller: AbortController; provider: string }>();
+  const active = new Map<string, { controller: AbortController; provider: string; profileId?: string }>();
   // Keys live only in this process's memory: a key entered in the app lasts
   // until Disconnect or a restart. They are never returned, stored or logged.
   const connections = new Map<string, Connection>();
@@ -108,11 +112,18 @@ export function createApp({
   };
   const versions = new Map<string, number>();
   const checks = new Map<string, Set<AbortController>>();
-  const state = (): ProvidersState => ({
-    presets: PRESETS,
-    connected: [...connections.values()].map(({ preset, settings, source }) => ({ id: preset.id, source, baseUrl: settings.baseUrl })),
-    savedBaseUrls: Object.fromEntries(Object.entries(saved).flatMap(([id, entry]) => (entry.baseUrl ? [[id, entry.baseUrl]] : []))),
-  });
+  const state = (): ProvidersState => {
+    const plan = chatGPTPlan?.state();
+    const connected: ProviderConnection[] = [...connections.values()].map(({ preset, settings, source }) => ({ id: preset.id, source, baseUrl: settings.baseUrl }));
+    if (plan?.accounts.some(account => account.id === plan.activeId && account.status === "connected"))
+      connected.push({ id: CHATGPT_PLAN, source: "plan", baseUrl: RESOURCE });
+    return {
+      presets: PRESETS,
+      connected,
+      savedBaseUrls: Object.fromEntries(Object.entries(saved).flatMap(([id, entry]) => (entry.baseUrl ? [[id, entry.baseUrl]] : []))),
+      ...(plan ? { chatGPTPlan: plan } : {}),
+    };
+  };
   // Live model lists filtered to the catalog's chat models, or the catalog when
   // the provider doesn't list them. Local servers always show their own.
   const modelIds = (connection: Connection) => {
@@ -156,11 +167,49 @@ export function createApp({
 
   app.get("/api/providers", (_req, res) => res.json(state()));
   app.get("/api/models", async (_req, res) => {
-    const lists = await Promise.all([...connections.values()].map(async (connection) =>
-      (await modelIds(connection)).map((id) => modelInfo(connection.preset, id)).sort((a, b) => a.label.localeCompare(b.label)),
-    ));
-    res.json({ models: lists.flat() });
+    const [lists, plan] = await Promise.all([
+      Promise.all([...connections.values()].map(async connection =>
+        (await modelIds(connection)).map(id => modelInfo(connection.preset, id)).sort((a, b) => a.label.localeCompare(b.label)),
+      )),
+      chatGPTPlan?.models(AbortSignal.timeout(15_000))
+        .then(models => ({ models, planIssue: undefined }), error => ({ models: [], planIssue: planIssue(error) })),
+    ]);
+    res.json({ models: [...lists.flat(), ...(plan?.models ?? [])], planIssue: plan?.planIssue });
   });
+  if (chatGPTPlan) {
+    const planPath = `/api/providers/${CHATGPT_PLAN}`;
+    const id = (value: unknown) => {
+      if (!validId(value)) throw new ApiError(400, "invalid_profile", "Choose a saved ChatGPT account.");
+      return value;
+    };
+    app.get(planPath, (_req, res) => res.json(chatGPTPlan.state()));
+    app.post(`${planPath}/sign-in`, async (req, res) => {
+      const profileId = req.body?.profileId === undefined ? undefined : id(req.body.profileId);
+      const launchUrl = await chatGPTPlan.start(profileId, Boolean(profileId && req.body?.reconsent === true));
+      res.json({ launchUrl });
+    });
+    app.post(`${planPath}/cancel`, (_req, res) => {
+      chatGPTPlan.cancel();
+      res.json(state());
+    });
+    app.post(`${planPath}/select`, async (req, res) => {
+      await chatGPTPlan.select(id(req.body?.profileId));
+      res.json(state());
+    });
+    app.post(`${planPath}/welcome`, (req, res) => {
+      chatGPTPlan.welcome(id(req.body?.profileId));
+      res.json(state());
+    });
+    app.delete(planPath, async (req, res) => {
+      const profileId = id(req.body?.profileId);
+      const disconnect = chatGPTPlan.disconnect(profileId);
+      for (const request of active.values()) {
+        if (request.provider === CHATGPT_PLAN && request.profileId === profileId) request.controller.abort(revoked());
+      }
+      await disconnect;
+      res.json(state());
+    });
+  }
   app.post("/api/providers/:id", async (req, res, next) => {
     const preset = presetById(req.params.id);
     if (!preset) return next(new ApiError(404, "unknown_provider", "Choose a supported provider."));
@@ -260,6 +309,7 @@ export function createApp({
       messages,
       provider: providerId = LEGACY_PROVIDER,
       model = LEGACY_MODEL,
+      profileId,
     } = req.body || {};
     const validId = (id: unknown) =>
       typeof id === "string" && /^[a-zA-Z0-9_-]{1,100}$/.test(id);
@@ -282,35 +332,18 @@ export function createApp({
       );
       return;
     }
+    const plan = providerId === CHATGPT_PLAN ? chatGPTPlan : undefined;
     const preset = presetById(providerId);
-    if (!preset) {
-      next(new ApiError(400, "unknown_provider", "Choose a supported provider."));
-      return;
+    if (providerId === CHATGPT_PLAN && (!plan || !validId(profileId))) return next(revoked());
+    if (!preset && !plan) return next(new ApiError(400, "unknown_provider", "Choose a supported provider."));
+    const connection = preset && connections.get(preset.id);
+    if (preset && !connection) {
+      return next(new ApiError(401, "not_connected", `Connect ${preset.name} first, then retry. Your prompt is saved.`));
     }
-    const connection = connections.get(preset.id);
-    if (!connection) {
-      next(
-        new ApiError(
-          401,
-          "not_connected",
-          `Connect ${preset.name} first, then retry. Your prompt is saved.`,
-        ),
-      );
-      return;
-    }
-    const info = modelInfo(preset, model);
-    if (!info.vision && messages.some((m: ChatMessage) => (m.images || m.attachmentIds))) {
-      next(
-        new ApiError(
-          400,
-          "image_unsupported",
-          `${info.label} can’t read images. Choose a model that sees images.`,
-        ),
-      );
-      return;
-    }
-    // A key replaced mid-request must not change the key this answer uses.
-    const { adapter: provider } = connection;
+    // Capture the exact key or plan account for this answer.
+    const provider: Pick<ProviderAdapter, "generate" | "upload"> = plan
+      ? { generate: (model, messages, signal) => plan.generate(profileId, model, messages, signal) }
+      : connection!.adapter;
     if (active.has(canvasId)) {
       next(
         new ApiError(
@@ -322,13 +355,16 @@ export function createApp({
       return;
     }
     const controller = new AbortController();
-    active.set(canvasId, { controller, provider: preset.id });
+    active.set(canvasId, { controller, provider: providerId, profileId: plan ? profileId : undefined });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const disconnected = () => {
       if (!res.writableEnded) controller.abort();
     };
     res.once("close", disconnected);
     try {
+      const info = plan ? await plan.model(profileId, model, AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)])) : modelInfo(preset!, model);
+      if (!info.vision && messages.some((m: ChatMessage) => m.images || m.attachmentIds))
+        throw new ApiError(400, "image_unsupported", `${info.label} can’t read images. Choose a model that sees images.`);
       const sizes: number[] = [];
       for (const m of messages as ChatMessage[]) {
         for (const id of m.attachmentIds ?? []) {
@@ -343,7 +379,7 @@ export function createApp({
       if (!messages.some((m: ChatMessage) => m.attachmentIds) && total > 64*1024*1024) throw new ApiError(413, "attachment_limit", "Inline images exceed 64 MiB.");
       // Without a Files API, images travel inside the request as base64.
       if (!provider.upload && total * 4 / 3 > MAX_REQUEST_BYTES - 1024 * 1024)
-        throw new ApiError(413, "attachment_limit", `${preset.name} receives images inside each request, which leaves room for about 35 MiB of images. Branch from an earlier message or attach fewer pages.`);
+        throw new ApiError(413, "attachment_limit", `${info.providerName} receives images inside each request, which leaves room for about 35 MiB of images. Branch from an earlier message or attach fewer pages.`);
       const resolved: ChatMessage[] = [];
       for (const { role, content, images, attachmentIds } of messages as ChatMessage[]) {
         const fileIds: string[] = [];
@@ -363,7 +399,7 @@ export function createApp({
     } catch (error) {
       next(
         controller.signal.aborted
-          ? new ApiError(
+          ? controller.signal.reason instanceof ApiError ? controller.signal.reason : new ApiError(
               504,
               "timeout",
               "This request was interrupted or timed out. Your prompt is saved; you can retry.",

@@ -2212,3 +2212,111 @@ for(const engine of ['Chromium','WebKit']) test(`${engine} creation before resto
     assert.deepEqual(errors,[]);
   } finally {await context.close();await safari?.close();}
 });
+
+test("ChatGPT plan and API keys coexist, and plan retries stay on their saved account", async () => {
+  const { context, page, errors } = await newPage(browser, "/test/reset?plan=1");
+  try {
+    let nextAccount = "a";
+    await context.route(url => url.hostname === "127.0.0.1" && url.pathname.startsWith("/auth/start/"), async route => {
+      // Run the actual local launch once, then replace the external consent
+      // screen with a synthetic callback in the same browser tab.
+      const launch = await fetch(route.request().url(), { redirect: "manual" });
+      assert.equal(launch.status, 302);
+      const authorization = new URL(launch.headers.get("Location"));
+      assert.equal(authorization.origin, "https://auth.openai.com");
+      const redirect = authorization.searchParams.get("redirect_uri");
+      const callback = new URL(redirect);
+      callback.searchParams.set("state", authorization.searchParams.get("state"));
+      callback.searchParams.set("client_id", `oaiapp_${nextAccount}`);
+      callback.searchParams.set("code", Buffer.from(JSON.stringify({
+        account: nextAccount,
+        challenge: authorization.searchParams.get("code_challenge"),
+        nonce: authorization.searchParams.get("nonce"),
+        redirect,
+      })).toString("base64url"));
+      await route.fulfill({
+        contentType: "text/html",
+        body: `<!doctype html><script>location.replace(${JSON.stringify(callback.href)})</script>`,
+      });
+    });
+    await page.goto(origin);
+    await page.getByRole("button", { name: "DeepSeek connected" }).click();
+    const dialog = page.getByRole("dialog", { name: "Connect a provider." });
+    const plan = dialog.getByRole("region", { name: "Use your ChatGPT plan" });
+    const finishSignIn = async () => {
+      await plan.getByRole("button", { name: "Continue with ChatGPT" }).click();
+      const welcome = page.getByRole("dialog", { name: "You’re using your ChatGPT plan" });
+      await welcome.getByRole("button", { name: "Got it" }).click();
+      await plan.getByText(/Active account:/).waitFor();
+    };
+    await finishSignIn();
+    const connected = dialog.getByRole("list", { name: "Connected providers" });
+    await connected.getByText("DeepSeek").waitFor();
+    for (const [id, label] of [["openai", "OpenAI"], ["anthropic", "Anthropic"]]) {
+      await dialog.getByLabel("Provider", { exact: true }).selectOption(id);
+      await dialog.getByLabel(`${label} API key`).fill(`sk-synthetic-plan-${id}`);
+      await dialog.getByRole("button", { name: `Connect ${label}`, exact: true }).click();
+      await connected.getByText(label, { exact: true }).waitFor();
+    }
+    const accountA = await plan.getByLabel("Saved ChatGPT account").inputValue();
+    assert.ok(accountA);
+    await dialog.getByRole("button", { name: "Close provider settings" }).click();
+    await page.getByRole("button", { name: "Model: DeepSeek Flash" }).click();
+    await page.getByRole("group", { name: "ChatGPT plan" }).getByRole("menuitemradio", { name: /Plan Vision/ }).click();
+    await page.getByText("Using ChatGPT plan", { exact: false }).waitFor();
+
+    await page.getByRole("textbox", { name: "Your prompt" }).fill("plan-retry-first");
+    await page.getByRole("button", { name: "Send prompt" }).click();
+    const failed = page.locator('[data-role="assistant"][data-status="error"]');
+    await failed.getByText("ChatGPT did not finish this answer.", { exact: false }).waitFor();
+
+    await page.locator(".provider-button").click();
+    nextAccount = "b";
+    await plan.getByLabel("Saved ChatGPT account").selectOption("");
+    await finishSignIn();
+    const accountB = await plan.getByLabel("Saved ChatGPT account").inputValue();
+    assert.ok(accountB && accountA !== accountB);
+    await dialog.getByRole("button", { name: "Close provider settings" }).click();
+    await failed.getByRole("button", { name: "Retry answer" }).click();
+    await page.locator('[data-role="assistant"][data-status="complete"]').getByText("Answer billed to a").waitFor();
+    const [saved] = await savedCanvas(page);
+    assert.equal(saved.messages.find(message => message.role === "assistant").profileId, accountA);
+
+    // Switching the active account changes new requests, while an existing
+    // failed answer retains its account until the user chooses another route.
+    await page.locator(".provider-button").click();
+    await plan.getByLabel("Saved ChatGPT account").selectOption(accountA);
+    await plan.getByRole("button", { name: "Use account" }).click();
+    await plan.getByRole("button", { name: "Use account" }).waitFor({ state: "hidden" });
+    await dialog.getByRole("button", { name: "Close provider settings" }).click();
+    await page.getByRole("textbox", { name: "Your prompt" }).fill("plan-limited");
+    await page.getByRole("button", { name: "Send prompt" }).click();
+    await failed.getByRole("link", { name: "Manage usage" }).waitFor();
+    await page.locator(".provider-button").click();
+    await plan.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await plan.getByLabel("Saved ChatGPT account").selectOption(accountB);
+    await plan.getByRole("button", { name: "Use account" }).click();
+    await plan.getByRole("button", { name: "Use account" }).waitFor({ state: "hidden" });
+    await dialog.getByRole("button", { name: "Close provider settings" }).click();
+    await failed.getByRole("button", { name: "Retry answer" }).click();
+    await failed.getByRole("button", { name: "Sign in again" }).waitFor();
+    await failed.getByRole("button", { name: "Change retry route" }).click();
+    const routeDialog = page.getByRole("dialog", { name: "Change retry route" });
+    await routeDialog.getByLabel("Model and billing route").selectOption(`${accountB}/gpt-6.1-sol`);
+    await routeDialog.getByRole("button", { name: /Retry with Plan Vision · ChatGPT plan/ }).click();
+    await page.locator('[data-role="assistant"][data-status="complete"]').getByText("Answer billed to b").waitFor();
+    await page.getByText("ChatGPT plan tokens", { exact: true }).waitFor();
+    await page.getByText("Estimated API cost (USD)", { exact: true }).waitFor();
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "Export canvas as JSON" }).click(),
+    ]);
+    const exported = await readFile(await download.path(), "utf8");
+    assert.doesNotMatch(exported, /mock-(access|refresh|subject)|oaiapp_|urn:uuid|mock@example.test|sk-synthetic-plan-/);
+    const answers = JSON.parse(exported).canvas.messages.filter(message => message.role === "assistant");
+    assert.deepEqual(answers.map(answer => answer.profileId), [accountA, accountB]);
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});

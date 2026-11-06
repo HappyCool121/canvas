@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 import type { Canvas, Message } from "../shared/types";
-import { MODEL_ID, modelKey, unknownModel, type ModelInfo } from "../shared/models";
+import { CHATGPT_PLAN, CHATGPT_USAGE_URL, MODEL_ID, modelKey, unknownModel, type ModelInfo } from "../shared/models";
 import { groupAttachments, isImageFile, MAX_IMAGES, documentLabel, Thumbnail } from "./images";
 import { plainText } from "./Markdown";
 
@@ -61,7 +61,7 @@ function ModelMenu({
     : models;
   const groups = [...new Set(shown.map((m) => m.providerName))];
   const typed = query.trim();
-  const custom = MODEL_ID.test(typed) && !models.some((m) => m.id === typed) ? providers : [];
+  const custom = MODEL_ID.test(typed) && !models.some((m) => m.provider !== CHATGPT_PLAN && m.id === typed) ? providers : [];
   const choose = (option: ModelInfo) => {
     onModel(option);
     setOpen(false);
@@ -122,7 +122,7 @@ function ModelMenu({
               </button>
             ))}
             {!shown.length && !custom.length && (
-              <p className="model-empty">{providers.length ? "No matching models. Type a full model id to use it." : "Connect a provider to choose a model."}</p>
+              <p className="model-empty">{providers.length ? "No matching models. Type a full model id to use it." : models.length ? "No matching models." : "Connect a provider to choose a model."}</p>
             )}
           </div>
         </div>
@@ -224,11 +224,13 @@ export function Composer({
   const images = canvas.draftImages ?? [];
   const editing = Boolean(canvas.editingId);
   const blockedImages = !model.vision && images.length > 0;
+  const plan = model.provider === CHATGPT_PLAN;
   const ready =
     connected &&
     !generating &&
     !preparing &&
     !blockedImages &&
+    !(plan && !model.vision && branchImages) &&
     Boolean(canvas.draft.trim() || images.length);
   const hint = blockedImages
     ? `${model.label} can’t see ${images.some((image) => image.docx)
@@ -388,7 +390,7 @@ export function Composer({
                 {preparationProgress || "Preparing attachments…"} <X size={13} />
               </button>
             )}
-            {!connected && (
+            {!connected && (model.provider || models.length === 0) && (
               <button type="button" className="connect-prompt" onClick={onConnect}>
                 <KeyRound size={13} /> Connect a provider to send
               </button>
@@ -412,6 +414,9 @@ export function Composer({
             </button>
           </div>
         </div>
+        {plan && connected && <p className="plan-route">
+          Using ChatGPT plan <a href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">Manage usage</a>
+        </p>}
       </form>
     </div>
   );

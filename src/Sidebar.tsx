@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Download, GitBranch, LoaderCircle, PanelLeftClose, Plus } from "lucide-react";
+import { CHATGPT_USAGE_URL } from "../shared/models";
 import { canvasUsage } from "../shared/usage";
 import type { Canvas } from "../shared/types";
 
@@ -102,7 +103,13 @@ export function Sidebar({
           <dl className="sidebar-usage" aria-label="Canvas usage" aria-live="polite">
             <dt>Tokens used</dt>
             <dd>{usage.tokens.toLocaleString()}{usage.missingUsage && " (partial)"}</dd>
-            <dt>Estimated cost (USD)</dt>
+            {usage.planAnswers && <>
+              <dt>ChatGPT plan tokens</dt>
+              <dd>{usage.planTokens.toLocaleString()}{usage.missingPlanUsage && " (partial)"}{" "}
+                <a href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">Manage usage</a>
+              </dd>
+            </>}
+            <dt>{usage.planAnswers ? "Estimated API cost (USD)" : "Estimated cost (USD)"}</dt>
             <dd title="At list prices from the models.dev catalog, or as the provider reported. DeepSeek charges more at peak hours.">
               ≈ {usd(usage.cost)}{usage.partial && " (partial)"}
             </dd>

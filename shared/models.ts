@@ -14,7 +14,13 @@ export type ModelInfo = {
   vision: boolean;
   reasoning?: boolean;
   contextWindow?: number;
+  // Local account that supplied this ChatGPT plan model.
+  profileId?: string;
 };
+
+export const CHATGPT_PLAN = "chatgpt-plan";
+export const CHATGPT_PLAN_NAME = "ChatGPT plan";
+export const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage";
 
 // Answers from before providers could be chosen were written by DeepSeek.
 export const LEGACY_PROVIDER = "deepseek";
@@ -41,5 +47,5 @@ export function parseModelKey(key: string | null | undefined) {
 
 // Describes a model the catalog doesn't know, such as an Azure deployment or a local model.
 export function unknownModel(provider: string, providerName: string, id: string): ModelInfo {
-  return { provider, providerName, id, label: id, description: providerName, vision: true };
+  return { provider, providerName, id, label: id, description: providerName, vision: provider !== CHATGPT_PLAN };
 }

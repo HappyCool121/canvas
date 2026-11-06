@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import { ChevronLeft, LoaderCircle } from "lucide-react";
 import { useWorkspace } from "./useWorkspace";
@@ -12,10 +12,11 @@ import { DocumentPages } from "./DocumentPages";
 import { Composer } from "./Composer";
 import { ContextMeter } from "./ContextMeter";
 import { ProviderDialog } from "./ProviderDialog";
+import { PlanRetryDialog } from "./PlanRetryDialog";
 import { api } from "./api";
 import { ancestorPath, contextTokens, visualParent } from "../shared/graph";
-import { modelKey, parseModelKey, unknownModel, type ModelInfo } from "../shared/models";
-import type { Canvas, Message, ProvidersState } from "../shared/types";
+import { CHATGPT_PLAN, CHATGPT_PLAN_NAME, modelKey, parseModelKey, unknownModel, type ModelInfo } from "../shared/models";
+import type { Canvas, Message, PlanIssue, ProvidersState } from "../shared/types";
 
 const SIDEBAR_KEY = "canvas.sidebar";
 const MODEL_KEY = "canvas.model";
@@ -55,7 +56,10 @@ const NO_MODEL: ModelInfo = { provider: "", providerName: "", id: "", label: "Ch
 
 export default function App() {
   const [providers, setProviders] = useState<ProvidersState>({ presets: [], connected: [], savedBaseUrls: {} });
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [listedModels, setModels] = useState<ModelInfo[]>([]);
+  const [catalogIssue, setCatalogIssue] = useState<PlanIssue>();
+  const plan = providers.chatGPTPlan;
+  const models = listedModels.filter(m => m.provider !== CHATGPT_PLAN || m.profileId === plan?.activeId);
   const workspace = useWorkspace(models);
   const { active: canvas } = workspace;
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
@@ -66,15 +70,23 @@ export default function App() {
   const [modelChoice, setModelChoice] = useState(() => stored(MODEL_KEY));
   const connectedIds = new Set(providers.connected.map((c) => c.id));
   const choice = parseModelKey(modelChoice);
-  const providerName = (id: string) => providers.presets.find((p) => p.id === id)?.name ?? id;
+  const providerName = (id: string) => id === CHATGPT_PLAN ? CHATGPT_PLAN_NAME : providers.presets.find(p => p.id === id)?.name ?? id;
+  const modelConnected = (model: ModelInfo) => connectedIds.has(model.provider) &&
+    (model.provider !== CHATGPT_PLAN || Boolean(model.profileId && model.profileId === plan?.activeId));
   // The chosen model, else the first model of a connected provider.
   const model =
     (choice && models.find((m) => m.provider === choice.provider && m.id === choice.id)) ??
-    (choice && connectedIds.has(choice.provider) ? unknownModel(choice.provider, providerName(choice.provider), choice.id) : undefined) ??
-    models[0] ?? NO_MODEL;
+    (choice && (choice.provider === CHATGPT_PLAN || connectedIds.has(choice.provider)) ? unknownModel(choice.provider, providerName(choice.provider), choice.id) : undefined) ??
+    models.find(m => m.provider !== CHATGPT_PLAN) ?? NO_MODEL;
   const [camera, setCamera] = useState<CameraRequest>();
   const [lastRead, setLastRead] = useState<{ canvasId: string; message: Message }>();
   const [providerOpen, setProviderOpen] = useState(false);
+  const [retryTarget, setRetryTarget] = useState<{ canvasId: string; answerId: string }>();
+  const [planRecovery, setPlanRecovery] = useState<{ profileId?: string; reconsent?: boolean }>();
+  function openProviders(recovery?: typeof planRecovery) {
+    setPlanRecovery(recovery);
+    setProviderOpen(true);
+  }
   const geometry = useRef<Record<string, import("../shared/graph").PlacementRect>>({});
   const stage = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -111,19 +123,29 @@ export default function App() {
 
   // Keys live in server memory, so recheck when a restart may have cleared them.
   const generatingAny = workspace.canvases.some((c) => c.messages.some((m) => m.status === "pending"));
-  const refreshModels = () =>
-    void api<{ models: ModelInfo[] }>("/api/models").then(({ models }) => setModels(models), () => {});
-  const updateProviders = (state: ProvidersState) => {
+  const modelRefresh = useRef(0);
+  const refreshModels = useCallback(() => {
+    const version = ++modelRefresh.current;
+    void api<{ models: ModelInfo[]; planIssue?: PlanIssue }>("/api/models").then(({ models, planIssue }) => {
+      if (version !== modelRefresh.current) return;
+      setModels(models);
+      setCatalogIssue(planIssue);
+      if (planIssue) void api<ProvidersState>("/api/providers").then(state => {
+        if (version === modelRefresh.current) setProviders(state);
+      }, () => {});
+    }, () => {});
+  }, []);
+  const updateProviders = useCallback((state: ProvidersState) => {
     setProviders(state);
     refreshModels();
-  };
+  }, [refreshModels]);
   useEffect(() => {
     const refresh = () =>
       void api<ProvidersState>("/api/providers").then(updateProviders, () => {});
     refresh();
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
-  }, [generatingAny]);
+  }, [generatingAny, updateProviders]);
 
   const empty = canvas?.messages.length === 0;
   const attach = (files: File[]) => {
@@ -153,6 +175,9 @@ export default function App() {
     setLastRead({ canvasId: canvas.id, message: selected });
   const readerOpen = !!selected && canvas?.readingPanelOpen !== false;
   const reading = selected ?? (lastRead?.canvasId === canvas?.id ? lastRead?.message : undefined);
+  const retryAnswer = retryTarget?.canvasId === canvas?.id
+    ? canvas?.messages.find(message => message.id === retryTarget?.answerId) : undefined;
+  const retryModels = (models.includes(model) ? models : [...models, model]).filter(modelConnected);
   useLayoutEffect(() => {
     const element = stage.current;
     const dock = composer.current?.closest<HTMLElement>(".composer-dock");
@@ -217,7 +242,7 @@ export default function App() {
           preferenceError={workspace.preferenceError}
           onRetrySave={() => void workspace.retrySave()}
           connected={providers.connected.map((c) => providerName(c.id))}
-          onProvider={() => setProviderOpen(true)}
+          onProvider={() => openProviders()}
         />
         <ReactFlowProvider key={canvas.id}>
           <main className="main-workspace">
@@ -231,6 +256,8 @@ export default function App() {
                   onDeselect={() => workspace.deselect(canvas.id)}
                   onGroupSelection={active => workspace.setGroupSelection(canvas.id, active)}
                   onRetry={(id) => void workspace.retry(canvas.id, id)}
+                  onPlanSettings={(profileId, reconsent) => openProviders({ profileId, reconsent })}
+                  onPlanReroute={(answerId) => setRetryTarget({ canvasId: canvas.id, answerId })}
                   onAppearance={(id, patch) => {
                     setCamera({ ids: [id] });
                     void workspace.update(canvas.id, (c) => ({ ...c, messages: c.messages.map((m) => m.id === id ? { ...m, ...patch } : m) }));
@@ -308,9 +335,9 @@ export default function App() {
                   notice={workspace.notice}
                   models={models}
                   model={model}
-                  providers={providers.connected.map((c) => ({ id: c.id, name: providerName(c.id) }))}
-                  connected={connectedIds.has(model.provider)}
-                  onConnect={() => setProviderOpen(true)}
+                  providers={providers.connected.filter(c => c.id !== CHATGPT_PLAN).map(c => ({ id: c.id, name: providerName(c.id) }))}
+                  connected={modelConnected(model)}
+                  onConnect={() => openProviders()}
                   branchImages={branchImageCount(canvas)}
                   branchBytes={ancestorPath(canvas, canvas.editingId ? canvas.messages.find(m => m.id === canvas.editingId)?.parentId ?? null : canvas.draftParentId).flatMap(m => m.images ?? []).reduce((sum, image) => sum + (image.bytes ?? 0), 0)}
                   textarea={composer}
@@ -369,10 +396,25 @@ export default function App() {
         {workspace.pageSelection && (
           <DocumentPages selection={workspace.pageSelection} cancel={workspace.cancelPreparation} />
         )}
-        {providerOpen && (
+        {retryAnswer && ["error", "interrupted"].includes(retryAnswer.status) && (
+          <PlanRetryDialog
+            answer={retryAnswer}
+            models={retryModels}
+            accounts={plan?.accounts ?? []}
+            onClose={() => setRetryTarget(undefined)}
+            onRetry={(route) => {
+              setRetryTarget(undefined);
+              void workspace.retry(canvas.id, retryAnswer.id, route);
+            }}
+          />
+        )}
+        {(providerOpen || plan?.welcomeId) && (
           <ProviderDialog
             state={providers}
             onChange={updateProviders}
+            catalogIssue={catalogIssue}
+            onRefreshModels={refreshModels}
+            recovery={planRecovery}
             onClose={() => {
               setProviderOpen(false);
               composer.current?.focus({ preventScroll: true });

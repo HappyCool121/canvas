@@ -9,7 +9,7 @@ import {
   withoutImages,
   ancestorPath,
 } from "../shared/graph";
-import { LEGACY_MODEL, LEGACY_PROVIDER, type ModelInfo } from "../shared/models";
+import { CHATGPT_PLAN, LEGACY_MODEL, LEGACY_PROVIDER, type ModelInfo } from "../shared/models";
 import type {
   Canvas,
   ChatMessage,
@@ -196,7 +196,7 @@ export function useWorkspace(models: ModelInfo[]) {
       const provider = answer?.provider ?? LEGACY_PROVIDER;
       const model = answer?.model ?? LEGACY_MODEL;
       // Models the catalog doesn't describe may see images; the provider decides.
-      const vision = modelList.current.find((m) => m.provider === provider && m.id === model)?.vision ?? true;
+      const vision = provider === CHATGPT_PLAN || (modelList.current.find((m) => m.provider === provider && m.id === model)?.vision ?? true);
       const history = requestHistory(canvas, answerId);
       const messages: ChatMessage[] = await Promise.all(
         (vision ? history : withoutImages(history)).map(
@@ -214,6 +214,7 @@ export function useWorkspace(models: ModelInfo[]) {
           requestId: answerId,
           provider,
           model,
+          profileId: answer?.profileId,
           messages,
         }),
       });
@@ -226,6 +227,7 @@ export function useWorkspace(models: ModelInfo[]) {
           usage: response.usage,
           completedAt: Date.now(),
           error: undefined,
+          errorCode: undefined,
         });
         // Don't replace a parent the user deliberately selected during generation.
         const promptId = c.messages.find((m) => m.id === answerId)?.parentId;
@@ -239,6 +241,7 @@ export function useWorkspace(models: ModelInfo[]) {
           patchMessage(c, answerId, {
             status: controller.signal.aborted ? "interrupted" : "error",
             error: (error as Error).message,
+            errorCode: (error as { code?: string }).code,
           }),
         );
     } finally {
@@ -267,6 +270,7 @@ export function useWorkspace(models: ModelInfo[]) {
         editOf: current.editingId ?? undefined,
         model: model.id,
         provider: model.provider,
+        profileId: model.profileId,
         geometry,
       });
       const saved = commit(turn.canvas);
@@ -289,13 +293,14 @@ export function useWorkspace(models: ModelInfo[]) {
     }
   }
 
-  async function retry(canvasId: string, answerId: string) {
+  async function retry(canvasId: string, answerId: string, route?: ModelInfo) {
     const current = data.current.find((c) => c.id === canvasId);
     const answer = current?.messages.find((m) => m.id === answerId);
     if (
       !current ||
       !answer ||
       !["error", "interrupted"].includes(answer.status) ||
+      (route && answer.provider !== CHATGPT_PLAN) ||
       busy.current.has(canvasId) ||
       preparation.current?.canvasId === canvasId ||
       current.messages.some((m) => m.status === "pending")
@@ -304,12 +309,16 @@ export function useWorkspace(models: ModelInfo[]) {
     busy.current.add(canvasId);
     if (
       !(await update(canvasId, (c) =>
-        patchMessage(c, answerId, { status: "pending", error: undefined }),
+        patchMessage(c, answerId, {
+          status: "pending", error: undefined, errorCode: undefined,
+          ...(route ? { provider: route.provider, model: route.id, profileId: route.profileId } : {}),
+        }),
       ))
     ) {
       await update(canvasId, (c) =>
         patchMessage(c, answerId, {
           status: "error",
+          provider: answer.provider, model: answer.model, profileId: answer.profileId,
           error:
             "Local storage is still unavailable. No inference request was sent.",
         }),

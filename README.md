@@ -13,11 +13,11 @@ Canvas comes in two forms.
 - **Work together.** Editors prompt, branch, edit prompts, attach files and move bubbles on the same canvas, and changes appear for everyone within seconds. Each person keeps their own selection, draft, reading panel and view.
 - **No API key needed.** Models are included through Canvas credits.
 
-**This repository** is the open-source version of the same canvas, for personal use. It runs on your own machine with your own API keys from almost any provider: OpenAI, Anthropic, Google Gemini, DeepSeek, OpenRouter, a local Ollama server, or any OpenAI-compatible endpoint. Your canvases are saved as files on your computer. It has no accounts, cloud sync, sharing or collaboration, and no usage limits of its own: each provider bills you directly.
+**This repository** is the open-source version of the same canvas, for personal use. It runs on your own machine with an eligible ChatGPT plan, an API key from a provider such as OpenAI, Anthropic, Google Gemini, DeepSeek, or OpenRouter, or a local server such as Ollama. Your canvases are saved as files on your computer. Provider accounts handle inference billing.
 
 ## Quick start
 
-Requires Node.js 22.13+, npm, and an API key from one of the [supported providers](#providers), or a local model server such as Ollama or LM Studio. From this directory:
+Requires Node.js 22.13+ and npm. From this directory:
 
 ```sh
 npm ci
@@ -26,13 +26,23 @@ npm run dev
 
 1. Open **http://127.0.0.1:3000**. Keep the terminal running while you use Canvas.
 2. Choose **Connect a provider to send** in the composer, or **Connect a provider** at the bottom of the sidebar.
-3. Pick your provider, paste your key (local servers don't need one) and choose **Connect**. Then pick a model in the composer and write your first prompt.
+3. Choose **Continue with ChatGPT**, enter an API key under **Provider**, or connect a local model server. Pick a model in the composer and write your first prompt.
 
 You can connect several providers at once and switch models between prompts, so you can branch sideways from any message to ask a different model. If port 3000 is busy, run `PORT=3001 npm run dev` and open that address instead. For a built app, run `npm run build && npm start`.
 
+## Use your ChatGPT plan
+
+In provider settings, choose **Continue with ChatGPT** to authorize Canvas in your browser. Eligible Plus and Pro accounts can select a model from the **ChatGPT plan** group in the composer. **Using ChatGPT plan** identifies the billing route. **Manage usage** opens [ChatGPT usage settings](https://chatgpt.com/settings/usage).
+
+To switch accounts, select a saved account and choose **Use account**. **Disconnect** stops that account's pending answers and removes its local tokens after trying to revoke its renewable session. Canvas remembers the account label, registration, and last active connection in a separate per-user credential directory. On macOS this is `~/Library/Application Support/Canvas-chatgpt-plan`, on Windows it is `~/AppData/Roaming/Canvas-chatgpt-plan`, and on Linux it is `~/.local/share/canvas-chatgpt-plan`. One Canvas process manages this directory at a time.
+
+A failed plan answer keeps its prompt, original model, and account. **Retry answer** uses that route. To change it, choose **Change retry route** on the failed bubble, select a model and billing route, and use the labeled **Retry with …** action. The usage summary counts ChatGPT plan tokens separately from API dollar estimates. Existing canvases open as before.
+
+Plan models come from the active account's live catalog. Image input is available when Canvas's bundled catalog identifies the model as vision-capable. Canvas sends the branch to the Responses API and displays the answer after the stream completes. [OpenAI integration guide](https://developers.openai.com/siwc/token-sharing-open-source)
+
 ## Providers
 
-Canvas speaks the OpenAI Chat Completions API, which most providers offer. Anthropic and Google Gemini are reached through their official OpenAI-compatible endpoints. The list follows the providers supported by [pi](https://github.com/earendil-works/pi).
+For API-key and local connections, Canvas speaks the OpenAI Chat Completions API, which most providers offer. Anthropic and Google Gemini are reached through their official OpenAI-compatible endpoints. The list follows the providers supported by [pi](https://github.com/earendil-works/pi).
 
 | Provider | `.env` variables | Notes |
 | --- | --- | --- |
@@ -66,7 +76,7 @@ Canvas speaks the OpenAI Chat Completions API, which most providers offer. Anthr
 | LM Studio | `LMSTUDIO_BASE_URL` | No key needed. |
 | Custom (OpenAI-compatible) | `OPENAI_COMPATIBLE_BASE_URL` + optional `OPENAI_COMPATIBLE_API_KEY` | vLLM, llama.cpp, LiteLLM or any server with `/chat/completions`. |
 
-Not supported: Amazon Bedrock and Google Vertex AI (they sign requests with cloud credentials rather than an API key), GitHub Copilot and OpenAI Codex (subscription sign-in rather than API keys), Meta's Model API (pi reaches it through the OpenAI Responses API, which Canvas doesn't speak), and pi's own Radius and TypeSafe services. A provider with an OpenAI-compatible endpoint that isn't listed works through **Custom**.
+Not supported: Amazon Bedrock and Google Vertex AI (they sign requests with cloud credentials rather than an API key), GitHub Copilot and OpenAI Codex (subscription sign-in rather than API keys), Meta's Model API (pi reaches it through its Responses-compatible endpoint), and pi's own Radius and TypeSafe services. A provider with an OpenAI-compatible endpoint that isn't listed works through **Custom**.
 
 **Models.** After you connect, the model menu lists the provider's chat models, with context windows, image support and prices from a bundled snapshot of [models.dev](https://models.dev) (MIT). Search the menu, or type any model id the provider accepts, such as an Azure deployment or a model released after the snapshot. Local servers list their own models. Refresh the snapshot with `npm run catalog`; Canvas never fetches it while running.
 
@@ -90,7 +100,7 @@ Not supported: Amazon Bedrock and Google Vertex AI (they sign requests with clou
 - The AI sees only the root-to-selected-message path plus your new prompt. Later messages and sibling branches are excluded. Branching from a user message preserves consecutive user roles.
 - **Edit prompt** in the reading panel rewrites a prompt: the rewrite branches sideways from the original (dashed connector) and gets a fresh answer. The rewrite replaces the original in context; the original branch is kept.
 - Attach up to 600 images or rendered document pages across the selected conversation with the image button, by pasting, or by dropping them on the composer. Canvas bubbles show a bounded preview; the reader provides all attachments. Large images are downscaled in the browser; formats providers don’t take (HEIC in Safari, AVIF or BMP in Chrome) are converted to JPEG/PNG when the browser can read them.
-- Choose the model from the composer’s model menu, grouped by provider. Search it, or type a model id the list doesn’t show. The choice is remembered in the local workspace; each answer records its provider and model, and retries use them. Models that can’t see images, such as DeepSeek V4 Pro, receive each image in the branch as a short “[Image not shown…]” note, and attaching is disabled until you choose a model that sees images.
+- Choose the model from the composer’s model menu, grouped by provider. Search it, or type a model id the list doesn’t show. Canvas remembers the model choice and records each answer’s provider and model for retries. Text-only API-key models receive a short “[Image not shown…]” note for each image in the branch. ChatGPT plan branches with images require a model that can see them.
 - Every bubble shows when it was written in its bottom-left corner. Errors appear as a dismissible pop-up above the composer.
 - The layout settles like a mind map, then stops. Outside new-branch insertion, selecting a bubble moves only that bubble against stationary neighbours and connected anchors. Shift + drag empty canvas to select intersecting bubbles; each rectangle replaces the previous group. Shift + click toggles group membership. Drag any selected bubble to move the group while preserving relative positions; unselected bubbles stay stationary. Ordinary clicking selects one bubble. Group gestures keep the last active reader/reply target and reader visibility, and hide individual appearance/resize controls. Groups reset to the active bubble on reload or canvas switch. Dropped positions stay relative to their final parent positions. Deselecting resumes whole-map settling only when needed. Scroll to pan, pinch or use −/+ to zoom. **Fit to view** shows the graph; **Go to root** returns to the initial prompt.
 - The bar in the bottom-left corner shows the selected branch’s context against the chosen model’s context window: exact once the provider reports usage, estimated otherwise. For models without a known window it shows the token count only.
@@ -182,7 +192,9 @@ npm run test:e2e
 - `src/`: bubble graph and force layout (`physics.ts`), top bar, reading panel, composer, context meter, sidebar, provider dialog, image handling and the API repository (with a retained IndexedDB import adapter).
 - `tests/`: domain, disk/browser storage, API and browser acceptance. `node --import tsx tests/profile-layout.ts` writes collision profiling evidence to `output/layout-profile.json`.
 
-See `SPEC.md` for behavior. Streaming, cloud sync, tools, regeneration and branch merging are not implemented yet.
+See `SPEC.md` for behavior.
+
+Before releasing the ChatGPT plan preview, verify browser sign-in, a branched reply, a supported image prompt, session restoration after restarting Canvas, and usage attribution in ChatGPT settings with an eligible account.
 
 ## License
 

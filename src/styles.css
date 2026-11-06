@@ -1900,3 +1900,65 @@ p {
 .react-flow__nodesselection { pointer-events: none; }
 .react-flow__nodesselection-rect { pointer-events: none; }
 .react-flow__selection { background: rgba(118, 183, 143, .13); border: 1px solid var(--accent); }
+
+.chatgpt-plan-settings {
+  margin: 0 0 20px;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+}
+.chatgpt-plan-settings h3 {
+  font-size: 14px;
+  margin: 0 0 6px;
+}
+.chatgpt-plan-settings > p:not(.form-error) {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0;
+}
+.chatgpt-plan-settings .plan-active {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+.plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.plan-actions .disconnect { margin: 0; }
+.chatgpt-sign-in {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #000;
+  color: #fff;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-weight: 550;
+}
+.chatgpt-sign-in img { width: 18px; height: 18px; }
+.chatgpt-sign-in:disabled { opacity: 0.6; }
+.plan-route {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+.plan-route a { margin-left: 6px; }
+.plan-route a, .plan-actions a, .plan-welcome a, .sidebar-usage a, .plan-error-action {
+  color: var(--accent);
+}
+.bubble-error .plan-error-action { margin-right: 6px; font-size: 12px; }
+.plan-retry-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}

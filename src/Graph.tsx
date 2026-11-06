@@ -19,6 +19,7 @@ import {
   type Viewport,
 } from "@xyflow/react";
 import { Palette, Minimize2, Maximize2, RotateCcw } from "lucide-react";
+import { CHATGPT_PLAN, CHATGPT_USAGE_URL } from "../shared/models";
 import type { Canvas, Message } from "../shared/types";
 import { ancestorPath, automaticOffset, CARD_WIDTH, linkKind, visualParent } from "../shared/graph";
 import { messageTitle, BUBBLE_COLORS } from "../shared/titles";
@@ -34,6 +35,8 @@ type Point = { x: number; y: number };
 type MessageData = {
   message: Message;
   onRetry: (id: string) => void;
+  onPlanSettings: (profileId?: string, reconsent?: boolean) => void;
+  onPlanReroute: (id: string) => void;
   generating: boolean;
   multiple: boolean;
   onResize: (id: string, rect: Rectangle, phase: ResizePhase) => void;
@@ -190,6 +193,13 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
               : "A small interruption"}
           </strong>
           <p>{m.error}</p>
+          {m.provider === CHATGPT_PLAN && m.errorCode === "chatgpt_plan_limit" &&
+            <a className="nodrag plan-error-action" href={CHATGPT_USAGE_URL} target="_blank" rel="noreferrer">Manage usage</a>}
+          {m.provider === CHATGPT_PLAN && ["chatgpt_plan_consent", "chatgpt_plan_revoked"].includes(m.errorCode ?? "") &&
+            <button type="button" className="nodrag plan-error-action" onClick={event => {
+              event.stopPropagation();
+              data.onPlanSettings(m.profileId, m.errorCode === "chatgpt_plan_consent");
+            }}>{m.errorCode === "chatgpt_plan_consent" ? "Enable plan usage" : "Sign in again"}</button>}
           <button
             className="nodrag"
             disabled={data.generating}
@@ -200,6 +210,11 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
           >
             <RotateCcw size={13} /> Retry answer
           </button>
+          {m.provider === CHATGPT_PLAN && <button type="button" className="nodrag plan-error-action" disabled={data.generating}
+            onClick={event => {
+              event.stopPropagation();
+              data.onPlanReroute(m.id);
+            }}>Change retry route</button>}
         </div>
       ) : m.content ? (
         mode === "expanded" ? <div className="bubble-full nodrag nowheel"><Markdown content={m.content} /></div> : <MessagePreview content={m.content} prompt={!assistant} />
@@ -235,6 +250,8 @@ type Props = {
   onDeselect: () => void;
   onGroupSelection: (active: boolean) => void;
   onRetry: (id: string) => void;
+  onPlanSettings: (profileId?: string, reconsent?: boolean) => void;
+  onPlanReroute: (id: string) => void;
   onAppearance: MessageData["onAppearance"];
   onResize: (id: string, size: { width: number; height: number }, position: Point, offset?: Point) => void;
   onLayout: (positions: Map<string, Point>, rebase?: boolean) => void;
@@ -250,15 +267,19 @@ export function Graph({
   onDeselect,
   onGroupSelection,
   onRetry,
+  onPlanSettings,
+  onPlanReroute,
   onAppearance,
   onResize,
   onLayout,
   onDrop,
   onViewport,
 }: Props) {
-  const callbacks = useRef({ onResize, onRetry, onAppearance, onSelect, onDeselect, onDrop, onViewport, onGroupSelection });
-  callbacks.current = { onResize, onRetry, onAppearance, onSelect, onDeselect, onDrop, onViewport, onGroupSelection };
+  const callbacks = useRef({ onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onSelect, onDeselect, onDrop, onViewport, onGroupSelection });
+  callbacks.current = { onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onSelect, onDeselect, onDrop, onViewport, onGroupSelection };
   const retry = useCallback((id: string) => callbacks.current.onRetry(id), []);
+  const planSettings = useCallback<MessageData["onPlanSettings"]>((...args) => callbacks.current.onPlanSettings(...args), []);
+  const planReroute = useCallback((id: string) => callbacks.current.onPlanReroute(id), []);
   const appearance = useCallback<MessageData["onAppearance"]>((id, patch) => callbacks.current.onAppearance(id, patch), []);
   const container = useRef<HTMLDivElement>(null);
   const saveGesture = useCallback((v: Viewport) => callbacks.current.onViewport(v), []);
@@ -340,7 +361,7 @@ export function Graph({
       width: message.sizes?.[message.displayMode || "preview"]?.width,
       height: message.sizes?.[message.displayMode || "preview"]?.height,
       className: "nokey",
-      data: { message, onResize: resize, onRetry: retry, onAppearance: appearance, generating, multiple: false },
+      data: { message, onResize: resize, onRetry: retry, onPlanSettings: planSettings, onPlanReroute: planReroute, onAppearance: appearance, generating, multiple: false },
     }));
   const [nodes, setNodes] =
     useNodesState<MessageNodeType>(messageNodes());

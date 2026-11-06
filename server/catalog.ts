@@ -1,5 +1,5 @@
 import catalog from "../shared/catalog.json" with { type: "json" };
-import { MAX_OUTPUT_TOKENS, MODEL_OVERRIDES, REASONING_OUTPUT_TOKENS, modelKey, unknownModel, type ModelInfo } from "../shared/models";
+import { CHATGPT_PLAN, CHATGPT_PLAN_NAME, MAX_OUTPUT_TOKENS, MODEL_OVERRIDES, REASONING_OUTPUT_TOKENS, modelKey, unknownModel, type ModelInfo } from "../shared/models";
 import type { Preset } from "../shared/providers";
 import type { Usage } from "../shared/types";
 
@@ -28,6 +28,16 @@ export function modelInfo(preset: Preset, id: string): ModelInfo {
     reasoning: Boolean(reasoning),
     ...(context ? { contextWindow: context } : {}),
     ...override,
+  };
+}
+
+export function planModelInfo(id: string, label: string, profileId: string): ModelInfo {
+  const known = entry("openai", id);
+  const contextWindow = known?.[1] || undefined;
+  const vision = Boolean(known?.[3]);
+  return {
+    provider: CHATGPT_PLAN, providerName: CHATGPT_PLAN_NAME, id, label, profileId, vision, contextWindow,
+    description: [vision ? "Sees images" : "Text only", contextWindow ? `${tokens(contextWindow)} context` : ""].filter(Boolean).join(" · "),
   };
 }
 

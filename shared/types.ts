@@ -32,10 +32,12 @@ export type Message = {
   createdAt: number;
   status: "complete" | "pending" | "error" | "interrupted";
   error?: string;
+  errorCode?: string;
   truncated?: boolean;
   // The provider and model requested for an answer; retries reuse them.
   // Answers without a provider were written by DeepSeek.
   provider?: string;
+  profileId?: string;
   model?: string;
   completedAt?: number;
   images?: ImageRef[];
@@ -80,10 +82,24 @@ export type ProviderConnection = {
   id: string;
   // "env" for a key from .env, "session" for one entered in the app,
   // "saved" for a keyless local server remembered between restarts.
-  source: "env" | "session" | "saved";
+  source: "env" | "session" | "saved" | "plan";
   baseUrl: string;
 };
+export type PlanIssue = { code: string; message: string };
+export type PlanAccount = {
+  id: string;
+  label: string;
+  status: "connected" | "consent" | "revoked" | "disconnected" | "disconnecting";
+};
+export type ChatGPTPlanState = {
+  accounts: PlanAccount[];
+  activeId?: string;
+  signingIn: boolean;
+  welcomeId?: string;
+  issue?: PlanIssue;
+};
 export type ProvidersState = {
+  chatGPTPlan?: ChatGPTPlanState;
   presets: Preset[];
   connected: ProviderConnection[];
   // Addresses entered earlier, to fill in the form again.

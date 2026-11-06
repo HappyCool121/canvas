@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import express from "express";
 import { createApp } from "../server/app";
+import { createChatGPTPlan } from "../server/chatgpt-plan";
+import { completed, events, planFixture } from "./plan-fixture";
 import type { EnvConnection } from "../server/config";
 import catalog from "../shared/catalog.json" with { type: "json" };
 
@@ -107,17 +109,37 @@ const app = express();
 let run = 0;
 // Fixtures start connected to DeepSeek, as with DEEPSEEK_API_KEY in .env,
 // unless reset with ?key=none.
-const freshApp = (connected = true) => createApp({
-  fetcher,
-  connections: connected ? [{ id: "deepseek", key: "sk-synthetic-browser-test", baseUrl: "https://api.deepseek.com" } satisfies EnvConnection] : [],
-  dataDir: path.join(process.env.CANVAS_DATA_DIR!, `run-${++run}`),
-});
+const freshApp = (connected = true, withPlan = false) => {
+  run++;
+  let retried = false;
+  const chatGPTPlan = withPlan ? createChatGPTPlan({
+    directory: path.join(process.env.CANVAS_DATA_DIR!, `plan-${run}`),
+    fetcher: planFixture({
+      generate(account, body) {
+        const last = body.input.at(-1).content;
+        if (last === "plan-retry-first" && !retried) {
+          retried = true;
+          return events({ type: "response.incomplete", response: { status: "incomplete" } });
+        }
+        if (last === "plan-limited" && account === "a") {
+          return events({ type: "response.failed", response: { error: { code: "subscription_sharing_usage_limit_exceeded" } } });
+        }
+        return events(completed(`Answer billed to ${account}`));
+      },
+    }).fetcher,
+  }) : undefined;
+  return createApp({
+    fetcher, chatGPTPlan,
+    connections: connected ? [{ id: "deepseek", key: "sk-synthetic-browser-test", baseUrl: "https://api.deepseek.com" } satisfies EnvConnection] : [],
+    dataDir: path.join(process.env.CANVAS_DATA_DIR!, `run-${run}`),
+  });
+};
 let testApp = freshApp();
 const fixtures = new Map([[String(run), testApp]]);
 app.post("/test/reset", (req, res) => {
   // Closing contexts may still send saves. Keep each context on its own
   // repository even when a late request arrives after the next fixture opens.
-  testApp = freshApp(req.query.key !== "none");
+  testApp = freshApp(req.query.key !== "none", req.query.plan === "1");
   fixtures.set(String(run), testApp);
   res.json({ ok: true, run });
 });

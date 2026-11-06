@@ -1,3 +1,4 @@
+import { CHATGPT_PLAN } from "./models";
 import type { Canvas } from "./types";
 
 // Older DeepSeek answers predate stored costs: USD per million tokens at off-peak rates.
@@ -10,12 +11,21 @@ const flashAliases = new Set(["deepseek-v4-flash", "deepseek-v4-flash-vision-exp
 
 export function canvasUsage(canvas: Canvas) {
   let tokens = 0;
+  let planTokens = 0;
+  let planAnswers = false;
+  let missingPlanUsage = false;
   let cost = 0;
   let missingUsage = false;
   let missingRate = false;
   for (const answer of canvas.messages) {
     if (answer.role !== "assistant" || answer.status !== "complete") continue;
     const { usage, model } = answer;
+    if (answer.provider === CHATGPT_PLAN) {
+      planAnswers = true;
+      if (usage) planTokens += usage.promptTokens + usage.completionTokens;
+      else missingPlanUsage = true;
+      continue;
+    }
     if (!usage) {
       missingUsage = true;
       continue;
@@ -37,5 +47,5 @@ export function canvasUsage(canvas: Canvas) {
     cost += (cached * rate.cached + (usage.promptTokens - cached) * rate.uncached +
       usage.completionTokens * rate.output) / 1_000_000;
   }
-  return { tokens, cost, missingUsage, partial: missingUsage || missingRate };
+  return { tokens: tokens + planTokens, planTokens, planAnswers, missingPlanUsage, cost, missingUsage: missingUsage || missingPlanUsage, partial: missingUsage || missingRate };
 }
