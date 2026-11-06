@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, KeyRound, LoaderCircle, Sparkles, X } from "lucide-react";
+import { ArrowUpRight, KeyRound, LoaderCircle, X } from "lucide-react";
 import { api } from "./api";
 import type { PlanIssue, ProvidersState } from "../shared/types";
 import type { Preset } from "../shared/providers";
@@ -100,9 +100,6 @@ export function ProviderDialog({
         >
           <X size={18} />
         </button>
-        <span className="dialog-icon">
-          <KeyRound size={23} />
-        </span>
         <span className="eyebrow">YOUR MODELS, YOUR KEYS</span>
         <h2 id="provider-title">Connect a provider.</h2>
         <p>Bring an API key from any provider below, or point Canvas at a local or OpenAI-compatible server. Each provider bills your own account.</p>
@@ -221,7 +218,7 @@ export function ProviderDialog({
             className="primary connect-button"
             disabled={busy || !preset || (!preset.keyless && !key.trim()) || (showBaseUrl && !baseUrl.trim())}
           >
-            {busy ? <LoaderCircle size={15} className="spin" /> : <Sparkles size={15} />}
+            {busy && <LoaderCircle size={15} className="spin" />}
             {busy ? "Checking…" : preset && connected.has(preset.id) ? `Replace ${preset.name} connection` : `Connect ${preset?.name ?? "provider"}`}
           </button>
         </form>

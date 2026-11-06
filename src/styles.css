@@ -1528,17 +1528,6 @@ p {
   top: 14px;
   right: 14px;
 }
-.dialog-icon {
-  width: 49px;
-  height: 49px;
-  background: rgb(159 160 255 / 18%);
-  border-radius: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--accent);
-  margin-bottom: 22px;
-}
 .eyebrow {
   font-size: 9px;
   letter-spacing: 1.6px;
