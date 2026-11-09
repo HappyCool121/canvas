@@ -56,6 +56,10 @@ export type Message = {
   reasoning?: string;
   // The prompt this one rewrites. Visual only: context still follows parentId.
   editOf?: string;
+  // Marks an answer that summarizes earlier context: `of` is the last message
+  // summarized, on `canvasId` when that is another canvas. A summary starts
+  // its own branch, so the summarized messages are no longer sent below it.
+  summary?: { of: string; canvasId?: string };
   usage?: Usage;
   color?: BubbleColor;
   displayMode?: "preview" | "compact" | "expanded";

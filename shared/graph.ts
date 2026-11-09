@@ -19,6 +19,16 @@ export type HistoryMessage = {
 // Sent before a branch that starts with an answer: some providers refuse a
 // conversation whose first message is the assistant's.
 export const CONTINUE_NOTE = "Continue from this earlier answer.";
+// A summary is sent as the answer to this turn, in place of the messages it summarizes.
+export const SUMMARY_NOTE = "Summarize our earlier conversation.";
+// Asks for the summary that replaces earlier context when a branch is cut loose.
+export const SUMMARY_PROMPT = [
+  "Summarize our conversation so far. The summary will replace these messages, and the conversation will continue from it alone.",
+  "Don't answer or continue the conversation, including its last message; summarize it instead.",
+  "Keep what is needed to continue: the goal and background, facts, names, numbers and decisions, what attached images, pages and files contained where it still matters, code or exact wording that is still needed, open questions, and the latest unanswered request, if any.",
+  "Leave out pleasantries and anything settled that no longer matters. Don't add anything new.",
+  "Write in the language of the conversation, as compact Markdown, starting with a short heading that names the topic.",
+].join(" ");
 export type LinkKind = "down" | "side";
 export const UNTITLED = "Untitled canvas";
 
@@ -41,9 +51,12 @@ export function newCanvas(): Canvas {
   };
 }
 
+// `unwritten` lets the path start at a summary still being written or retried,
+// for showing the branch it starts. Nothing can be sent from there until it is written.
 export function ancestorPath(
   canvas: Canvas,
   messageId: string | null,
+  unwritten = false,
 ): Message[] {
   const byId = new Map(canvas.messages.map((m) => [m.id, m]));
   const seen = new Set<string>();
@@ -55,32 +68,54 @@ export function ancestorPath(
     seen.add(id);
     const message = byId.get(id);
     if (!message) throw new Error("A message in this conversation is missing.");
-    if (message.status !== "complete")
-      throw new Error("Choose a completed message to continue.");
+    if (message.status !== "complete" && !(unwritten && message.summary))
+      throw new Error(message.summary
+        ? "This branch’s summary isn’t written yet. Wait for it, retry it, or choose Continue without summary."
+        : "Choose a completed message to continue.");
     result.unshift(message);
     id = message.parentId;
   }
   return result;
 }
 
-export function requestHistory(
-  canvas: Canvas,
-  assistantId: string,
-): HistoryMessage[] {
-  const answer = canvas.messages.find((m) => m.id === assistantId);
-  if (!answer || answer.role !== "assistant" || !answer.parentId)
-    throw new Error("Answer not found.");
-  const history: HistoryMessage[] = ancestorPath(canvas, answer.parentId).map(
-    ({ role, content, images, files }) => ({
+// The messages sent for a path. A summary stands in for what it summarizes, as
+// the answer to SUMMARY_NOTE. An answer that follows no prompt, as at the top of
+// a branch cut loose, gets CONTINUE_NOTE before it.
+export function contextMessages(path: Message[]): HistoryMessage[] {
+  const history: HistoryMessage[] = [];
+  for (const { role, content, images, files, summary } of path) {
+    if (summary) {
+      history.push({ role: "user", content: SUMMARY_NOTE }, { role: "assistant", content });
+      continue;
+    }
+    if (role === "assistant" && history.at(-1)?.role !== "user")
+      history.push({ role: "user", content: CONTINUE_NOTE });
+    history.push({
       role,
       content,
       ...(images?.length ? { images } : {}),
       ...(files?.length ? { files } : {}),
-    }),
-  );
-  return history[0]?.role === "assistant"
-    ? [{ role: "user", content: CONTINUE_NOTE }, ...history]
-    : history;
+    });
+  }
+  return history;
+}
+
+// The request for an answer. A summary is written from the path it summarizes,
+// which is on `source` when that is another canvas.
+export function requestHistory(
+  canvas: Canvas,
+  assistantId: string,
+  source: Canvas = canvas,
+): HistoryMessage[] {
+  const answer = canvas.messages.find((m) => m.id === assistantId);
+  if (answer?.role === "assistant" && answer.summary)
+    return [
+      ...contextMessages(ancestorPath(source, answer.summary.of)),
+      { role: "user", content: SUMMARY_PROMPT },
+    ];
+  if (!answer || answer.role !== "assistant" || !answer.parentId)
+    throw new Error("Answer not found.");
+  return contextMessages(ancestorPath(canvas, answer.parentId));
 }
 
 // For models without vision: each image becomes a note in the text.
@@ -212,12 +247,136 @@ export function copyBranch(canvas: Canvas, id: string): Canvas {
   };
 }
 
+// The model that writes a summary.
+export type SummaryRoute = { provider: string; model: string; profileId?: string };
+
+// Branching off with a summary. "detach" cuts the branch loose as above, with a
+// pending summary of the context above it beside the branch as its new top
+// bubble. "copy" starts a new canvas holding only a pending summary of the
+// conversation up to and including this bubble.
+export function summarizeBranch(
+  canvas: Canvas,
+  id: string,
+  mode: "detach" | "copy",
+  route: SummaryRoute,
+  geometry?: Record<string, PlacementRect>,
+) {
+  const selected = canvas.messages.find((m) => m.id === id);
+  if (selected && !selected.parentId) throw new Error("This bubble has no earlier context to summarize.");
+  const pending = (summary: Message["summary"], position: Message["position"]): Message => ({
+    id: uid(),
+    parentId: null,
+    role: "assistant",
+    content: "",
+    position,
+    createdAt: Date.now(),
+    status: "pending",
+    summary,
+    provider: route.provider,
+    model: route.model,
+    ...(route.profileId ? { profileId: route.profileId } : {}),
+  });
+  if (mode === "copy") {
+    ancestorPath(canvas, id);
+    const summary = pending({ of: id, canvasId: canvas.id }, { x: 0, y: 0 });
+    const fresh = newCanvas();
+    return {
+      canvas: {
+        ...fresh,
+        title: messageTitle(selected!).slice(0, 120),
+        rootId: summary.id,
+        selectedId: summary.id,
+        draftParentId: summary.id,
+        layout: canvas.layout,
+        viewport: { ...fresh.viewport, zoom: canvas.viewport.zoom },
+        messages: [summary],
+      },
+      summaryId: summary.id,
+      topId: undefined,
+    };
+  }
+  const { top } = checkBranch(canvas, id);
+  const of = top.parentId!;
+  if (canvas.messages.some((m) => m.status === "pending"))
+    throw new Error("An answer is already being written on this canvas.");
+  ancestorPath(canvas, of);
+  const target = detachBranch(canvas, id);
+  const branch = branchIds(canvas, id);
+  // The summary sits beside the top bubble, on its left where there is room, so
+  // the bubbles around the branch stay where they are.
+  const box = (m: Message): PlacementRect =>
+    geometry?.[m.id] ?? { ...m.position, ...(m.sizes?.[m.displayMode || "preview"] ?? { width: CARD_WIDTH, height: CARD_HEIGHT }) };
+  const rect = box(target.messages.find((m) => m.id === id)!);
+  const position = adjacentPosition(rect, { width: CARD_WIDTH, height: CARD_HEIGHT },
+    target.messages.filter((m) => m.id !== id).map(box), false, undefined,
+    [[-1, 0], [1, 0], [-1, -1], [1, -1], [0, -1], [-1, 1], [1, 1], [0, 1]]);
+  const summary = pending({ of }, position);
+  // Cutting loose left the top bubble and its edits without a parent.
+  const messages = target.messages.map((m): Message => {
+    if (!branch.has(m.id) || m.parentId) return m;
+    if (m.id !== id) return { ...m, parentId: summary.id };
+    return {
+      ...m,
+      parentId: summary.id,
+      placementOffset: { x: rect.x - position.x, y: rect.y - position.y },
+      layoutOffset: {
+        x: rect.x + rect.width / 2 - position.x - CARD_WIDTH / 2,
+        y: rect.y + rect.height / 2 - position.y - CARD_HEIGHT / 2,
+      },
+    };
+  });
+  return {
+    canvas: {
+      ...target,
+      // The summary opens in the reader as it is written, as a new answer does.
+      selectedId: summary.id,
+      draftParentId: summary.id,
+      updatedAt: Date.now(),
+      messages: [...messages, summary],
+    },
+    summaryId: summary.id,
+    topId: id,
+  };
+}
+
+// Where a summary cut a branch loose on this canvas: from the last message it
+// summarized to the bubble that hung from it. The map draws these dotted, as
+// context no longer flows along them.
+export function summaryCuts(canvas: Canvas): { from: string; to: string }[] {
+  const ids = new Set(canvas.messages.map((m) => m.id));
+  return canvas.messages.flatMap((s) => {
+    if (!s.summary || s.summary.canvasId || !ids.has(s.summary.of)) return [];
+    // The cut bubble predates its summary and comes first; replies to the summary come later.
+    const cut = canvas.messages.find((m) => m.parentId === s.id && !m.editOf && m.createdAt <= s.createdAt);
+    return cut ? [{ from: s.summary.of, to: cut.id }] : [];
+  });
+}
+
+// "Continue without summary": a summary that couldn't be written goes, and its
+// branch is left loose, as if the earlier context had been left out.
+export function dropSummary(canvas: Canvas, id: string): Canvas {
+  const summary = canvas.messages.find((m) => m.id === id);
+  if (!summary?.summary || (summary.status !== "error" && summary.status !== "interrupted")) return canvas;
+  const rest = new Set(canvas.messages.filter((m) => m.id !== id).map((m) => m.id));
+  const messages = canvas.messages.filter((m) => m.id !== id).map((m) => loosen(m, rest));
+  const next = { ...canvas, messages };
+  return {
+    ...next,
+    updatedAt: Date.now(),
+    rootId: canvas.rootId === id ? rootIds(next)[0] ?? null : canvas.rootId,
+    selectedId: canvas.selectedId === id ? null : canvas.selectedId,
+    draftParentId: canvas.draftParentId === id ? null : canvas.draftParentId,
+  };
+}
+
 export function linkKind(canvas: Canvas, message: Message): LinkKind | null {
   const parentId = visualParent(message);
   if (!parentId) return null;
   if (message.editOf) return "side";
-  if (message.role === "assistant") return "down";
   const parent = canvas.messages.find((m) => m.id === parentId);
+  // A summary sits beside the branch it starts.
+  if (parent?.summary) return "side";
+  if (message.role === "assistant") return "down";
   if (parent?.role !== "assistant") return "side";
   const first = canvas.messages
     .filter((m) => m.parentId === parentId && !m.editOf)
@@ -243,13 +402,16 @@ export function estimateTokens(message: {
 export function contextTokens(canvas: Canvas, messageId: string | null) {
   let path: Message[];
   try {
-    path = ancestorPath(canvas, messageId);
+    path = ancestorPath(canvas, messageId, true);
   } catch {
     return 0;
   }
+  // Usage reported before a summary, and the summary's own, counted the
+  // context it replaced.
+  const since = path[0]?.summary ? path[0].createdAt : -Infinity;
   let total = 0;
   for (let i = path.length - 1; i >= 0; i--) {
-    const usage = path[i].usage;
+    const usage = path[i].createdAt > since ? path[i].usage : undefined;
     if (usage) return total + usage.promptTokens + usage.completionTokens;
     total += estimateTokens(path[i]);
   }
@@ -278,8 +440,8 @@ export function automaticOffset(parent: Size, child: Size, offset: { x: number; 
   };
 }
 // Direction is chosen locally; collisions are resolved by insertion physics.
-export function adjacentPosition(parent: PlacementRect, prompt: { width: number; height: number }, occupied: PlacementRect[], continuation = true, response?: Size) {
-  const directions = continuation ? [[0,1],[1,0],[-1,0],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]] : [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]];
+export function adjacentPosition(parent: PlacementRect, prompt: { width: number; height: number }, occupied: PlacementRect[], continuation = true, response?: Size, order?: number[][]) {
+  const directions = order ?? (continuation ? [[0,1],[1,0],[-1,0],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]] : [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]]);
   const intersection = (a: PlacementRect, b: PlacementRect) => Math.max(0, Math.min(a.x+a.width,b.x+b.width)-Math.max(a.x,b.x))*Math.max(0,Math.min(a.y+a.height,b.y+b.height)-Math.max(a.y,b.y));
   const candidates = directions.map(([dx,dy], order) => {
     const x = dx > 0 ? parent.x+parent.width+72 : dx < 0 ? parent.x-prompt.width-72 : parent.x+(parent.width-prompt.width)/2;

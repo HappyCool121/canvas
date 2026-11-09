@@ -12,6 +12,9 @@ import {
   ancestorPath,
   copyBranch,
   detachBranch,
+  dropSummary,
+  summarizeBranch,
+  type PlacementRect,
 } from "../shared/graph";
 import { CHATGPT_PLAN, LEGACY_MODEL, LEGACY_PROVIDER, type ModelInfo } from "../shared/models";
 import type {
@@ -207,7 +210,11 @@ export function useWorkspace(models: ModelInfo[]) {
       const model = answer?.model ?? LEGACY_MODEL;
       // Models the catalog doesn't describe may see images; the provider decides.
       const vision = provider === CHATGPT_PLAN || (modelList.current.find((m) => m.provider === provider && m.id === model)?.vision ?? true);
-      const history = requestHistory(canvas, answerId);
+      // A summary from "New chat" summarizes messages on the canvas it was copied from.
+      const sourceId = answer?.summary?.canvasId;
+      const source = sourceId ? data.current.find((c) => c.id === sourceId) : canvas;
+      if (!source) throw new Error("The canvas this summary came from was deleted. Choose Continue without summary.");
+      const history = requestHistory(canvas, answerId, source);
       // Files travel as text inside their prompt, so every model can read them.
       const readFile = async (file: TextFileRef) => {
         const blob = await repository.current!.getImage(file.id, controller.signal);
@@ -251,9 +258,10 @@ export function useWorkspace(models: ModelInfo[]) {
         });
         // Don't replace a parent the user deliberately selected during generation.
         // Chat mode always follows the answer, as a chat continues from it.
+        // A summary has no prompt and leaves the selection alone.
         const promptId = c.messages.find((m) => m.id === answerId)?.parentId;
         const chatting = c.readerExpanded && c.readingPanelOpen !== false;
-        return c.selectedId === promptId && (!c.draft || chatting) && !groupSelection.current.has(canvasId)
+        return promptId && c.selectedId === promptId && (!c.draft || chatting) && !groupSelection.current.has(canvasId)
           ? { ...completed, selectedId: answerId, draftParentId: answerId }
           : completed;
       });
@@ -501,7 +509,7 @@ export function useWorkspace(models: ModelInfo[]) {
       return;
     }
     const contextId = current.editingId ? current.messages.find(m => m.id === current.editingId)?.parentId ?? null : current.draftParentId;
-    const previous = [...ancestorPath(current, contextId).flatMap(m => m.images ?? []), ...(current.draftImages ?? [])];
+    const previous = [...ancestorPath(current, contextId, true).flatMap(m => m.images ?? []), ...(current.draftImages ?? [])];
     const room = MAX_IMAGES - previous.length;
     if (file && images.length >= room) {
       setNotice("Free at least one image slot before attaching this document, or attach it separately.");
@@ -719,27 +727,58 @@ export function useWorkspace(models: ModelInfo[]) {
     }
   }
   // "Continue here" cuts the branch loose on this canvas; "New chat" copies it to
-  // a new canvas in the same folder. Either way context starts at its top bubble.
-  async function branchOff(canvasId: string, messageId: string, mode: "detach" | "copy") {
+  // a new canvas in the same folder. Either way context starts at its top bubble,
+  // or at a summary of the earlier context written by `summarize`.
+  // Returns the bubbles to bring into view.
+  async function branchOff(
+    canvasId: string,
+    messageId: string,
+    mode: "detach" | "copy",
+    summarize?: ModelInfo,
+    geometry?: Record<string, PlacementRect>,
+  ): Promise<{ canvasId: string; focus: string[] } | undefined> {
     const current = data.current.find((c) => c.id === canvasId);
     if (!current) return;
     setNotice("");
     try {
-      if (mode === "detach") {
+      if (mode === "detach" && !summarize) {
         await update(canvasId, (c) => detachBranch(c, messageId));
         return;
       }
-      const copy = copyBranch(current, messageId);
-      // Open it right away, as a new canvas does; the sidebar reports a failed save.
-      const saved = commit(copy);
-      const folder = parseFolders(preferencesRef.current[FOLDERS_KEY]).placement[canvasId];
-      if (folder) moveCanvas(copy.id, folder);
-      selectCanvas(copy.id);
-      if (!(await saved)) setNotice("The new canvas couldn’t be saved. Free disk space or check Canvas folder permissions, then choose Try saving again.");
-      return copy;
+      if (mode === "detach" && busy.current.has(canvasId))
+        throw new Error("An answer is already being written on this canvas.");
+      const { canvas: next, summaryId, topId } = summarize
+        ? summarizeBranch(current, messageId, mode, { provider: summarize.provider, model: summarize.id, profileId: summarize.profileId }, geometry)
+        : { canvas: copyBranch(current, messageId), summaryId: undefined, topId: undefined };
+      if (summaryId) busy.current.add(next.id);
+      // A new canvas opens right away; the sidebar reports a failed save.
+      const saved = commit(next);
+      if (mode === "copy") {
+        const folder = parseFolders(preferencesRef.current[FOLDERS_KEY]).placement[canvasId];
+        if (folder) moveCanvas(next.id, folder);
+        selectCanvas(next.id);
+      }
+      const focus = summaryId ? (topId ? [summaryId, topId] : [summaryId]) : [next.rootId!];
+      if (await saved) {
+        if (summaryId) void run(next.id, summaryId);
+      } else if (summaryId) {
+        await update(next.id, (c) =>
+          patchMessage(c, summaryId, {
+            status: "error",
+            error: "The summary could not be saved. No inference request was sent. Retry after fixing local storage.",
+          }),
+        );
+        busy.current.delete(next.id);
+      } else setNotice("The new canvas couldn’t be saved. Free disk space or check Canvas folder permissions, then choose Try saving again.");
+      return { canvasId: next.id, focus };
     } catch (error) {
       setNotice((error as Error).message);
     }
+  }
+  // Removes a summary that couldn't be written, leaving its branch loose.
+  function continueWithoutSummary(canvasId: string, summaryId: string) {
+    if (busy.current.has(canvasId)) return;
+    void update(canvasId, (c) => dropSummary(c, summaryId));
   }
 
   return {
@@ -755,6 +794,7 @@ export function useWorkspace(models: ModelInfo[]) {
     saveColor,
     importFile,
     branchOff,
+    continueWithoutSummary,
     preferences,
     setPreference,
     canvases,

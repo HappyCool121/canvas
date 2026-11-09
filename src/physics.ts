@@ -390,6 +390,9 @@ export function useForceLayout({
       next.set(item.id, body);
     }
     bodies.current = next;
+    // A bubble can go (a summary left out); an insertion it belonged to ends.
+    for (const kept of [insertion, restedInsertion])
+      if (kept.current && [...kept.current.fresh].some((id) => !next.has(id))) kept.current = null;
     // Measurement can finish after the user has already created another turn.
     // Only IDs present on mount belong to the restored layout in that case.
     if (!initialised.current && trustRestored) {
@@ -416,7 +419,10 @@ export function useForceLayout({
       const index = new SpatialIndex([...next.values()]);
       for (const id of fresh) for (const b of index.nearby(next.get(id)!,160)) if (b.id !== prompt?.parentId) ids.add(b.id);
       for (const id of ids) if (!fresh.has(id)) { const b=next.get(id)!; rest.set(id,{x:b.x,y:b.y}); }
-      insertion.current={ids,fresh,upward:upwardIds,launched:false,parentId:prompt?.parentId ?? prompt?.id,rest,offsets,completed:false};
+      // A fresh bubble that starts an existing branch, as a summary does, moves
+      // away from that branch, which holds still.
+      const started = prompt ? undefined : items.find(i => !fresh.has(i.id) && !!i.parentId && fresh.has(i.parentId));
+      insertion.current={ids,fresh,upward:upwardIds,launched:false,parentId:prompt?.parentId ?? prompt?.id ?? started?.id,rest,offsets,completed:false};
       sim.alphaDecay(0.10).velocityDecay(0.55);
     }
     if (insertion.current && selectedId && !insertion.current.fresh.has(selectedId)) {

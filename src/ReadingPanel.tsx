@@ -60,6 +60,7 @@ export function ReadingPanel({
           </div>
         )}
         {showWebsite ? <WebsiteFrame page={website} title="Website from this answer" /> : <>
+        {message.summary && <p className="summary-label">Summary of earlier context</p>}
         {message.images?.length ? (
           <div className="reading-images">
             {groupAttachments(message.images).map(({ id, name, images }) => (

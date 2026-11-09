@@ -45,7 +45,7 @@ function branchImageCount(canvas: Canvas) {
       null)
     : canvas.draftParentId;
   try {
-    return ancestorPath(canvas, contextId).reduce(
+    return ancestorPath(canvas, contextId, true).reduce(
       (count, m) => count + (m.images?.length ?? 0),
       0,
     );
@@ -286,9 +286,12 @@ export default function App() {
                     if (patch.displayMode !== undefined) setCamera({ ids: [id] });
                     void workspace.update(canvas.id, (c) => ({ ...c, messages: c.messages.map((m) => m.id === id ? { ...m, ...patch } : m) }));
                   }}
-                  onBranch={(id, mode) => void workspace.branchOff(canvas.id, id, mode).then((copy) => {
-                    if (copy?.rootId) setCamera({ ids: [copy.rootId] });
+                  // A summary is written by the model chosen in the composer.
+                  onBranch={(id, mode, summarize) => void workspace.branchOff(canvas.id, id, mode, summarize && modelConnected(model) ? model : undefined, geometry.current).then((branched) => {
+                    if (branched) setCamera({ ids: branched.focus });
                   })}
+                  onDropSummary={(id) => workspace.continueWithoutSummary(canvas.id, id)}
+                  summaryModel={{ label: model.label, contextWindow: model.contextWindow, connected: modelConnected(model) }}
                   onFocus={(id) => { select(id); setCamera({ ids: [id] }); }}
                   savedColors={workspace.savedColors}
                   onSaveColor={workspace.saveColor}
@@ -381,7 +384,7 @@ export default function App() {
                   connected={modelConnected(model)}
                   onConnect={() => openProviders()}
                   branchImages={branchImageCount(canvas)}
-                  branchBytes={ancestorPath(canvas, canvas.editingId ? canvas.messages.find(m => m.id === canvas.editingId)?.parentId ?? null : canvas.draftParentId).flatMap(m => m.images ?? []).reduce((sum, image) => sum + (image.bytes ?? 0), 0)}
+                  branchBytes={ancestorPath(canvas, canvas.editingId ? canvas.messages.find(m => m.id === canvas.editingId)?.parentId ?? null : canvas.draftParentId, true).flatMap(m => m.images ?? []).reduce((sum, image) => sum + (image.bytes ?? 0), 0)}
                   textarea={composer}
                   onDraft={(draft) =>
                     void workspace.update(canvas.id, (c) => ({ ...c, draft }))
@@ -447,6 +450,7 @@ export default function App() {
                       onSelect={select}
                       onEdit={(id) => workspace.startEdit(canvas.id, id)}
                       onRetry={(id) => void workspace.retry(canvas.id, id)}
+                      onDropSummary={(id) => workspace.continueWithoutSummary(canvas.id, id)}
                     />
                   </>
                 ) : reading && (

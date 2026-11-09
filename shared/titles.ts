@@ -25,6 +25,8 @@ export function messageTitle(message: Message): string {
   if (message.images?.some((i) => i.pdf)) return "PDF attachment";
   if (message.images?.some((i) => i.docx)) return "Word attachment";
   if (message.images?.length) return message.images.length === 1 ? "Image attachment" : `${message.images.length} image attachments`;
+  if (message.summary && message.status === "pending") return "Writing a summary…";
+  if (message.summary && message.status === "error") return "Summary needs a retry";
   return message.status === "pending" ? "Writing an answer…" : message.status === "interrupted" ? "Request interrupted" : message.status === "error" ? "Answer needs a retry" : "Empty message";
 }
 export const BUBBLE_COLORS = { white: "#ffffff", "pale-blue": "#d9eaf7", mist: "#e6eeeb", lavender: "#e5ddf6", coral: "#f5d8cd" } as const;

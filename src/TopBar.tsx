@@ -22,7 +22,7 @@ function PathFlow({ canvas, onPick }: { canvas: Canvas; onPick: (id: string) => 
   const host = useRef<HTMLDivElement>(null);
   const measure = useRef<HTMLDivElement>(null);
   let path: Message[] = [];
-  try { path = ancestorPath(canvas, canvas.selectedId); } catch { /* Invalid path has no navigation. */ }
+  try { path = ancestorPath(canvas, canvas.selectedId, true); } catch { /* Invalid path has no navigation. */ }
   const signature = path.map((m) => `${m.id}:${messageTitle(m)}`).join("|");
   useEffect(() => { setExpanded(false); }, [canvas.selectedId]);
   useLayoutEffect(() => {

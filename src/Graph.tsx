@@ -20,10 +20,11 @@ import {
   type MiniMapNodeProps,
   type Viewport,
 } from "@xyflow/react";
-import { FilePlus2, Palette, Minimize2, Maximize2, RotateCcw, Scissors, Unlink } from "lucide-react";
+import { ArrowLeft, Eraser, FilePlus2, Palette, Minimize2, Maximize2, RotateCcw, Scissors, ScrollText, Unlink } from "lucide-react";
 import { CHATGPT_PLAN, CHATGPT_USAGE_URL, effortLabel } from "../shared/models";
 import type { BubblePreset, Canvas, Message } from "../shared/types";
-import { ancestorPath, automaticOffset, CARD_WIDTH, linkKind, rootIds, visualParent } from "../shared/graph";
+import { ancestorPath, automaticOffset, CARD_WIDTH, contextTokens, linkKind, rootIds, summaryCuts, visualParent } from "../shared/graph";
+import { formatTokens } from "./ContextMeter";
 import { validHex } from "../shared/ids";
 import { ColorPicker, isDark } from "./ColorPicker";
 import { MenuItem, Popover, useMenu } from "./Menu";
@@ -49,7 +50,8 @@ type MessageData = {
   multiple: boolean;
   onResize: (id: string, rect: Rectangle, phase: ResizePhase) => void;
   onAppearance: (id: string, patch: Pick<Message, "color" | "displayMode">) => void;
-  onBranch: (id: string, mode: BranchMode) => void;
+  onBranch: (id: string, mode: BranchMode, summarize: boolean) => void;
+  onDropSummary: (id: string) => void;
 };
 type MessageNodeType = Node<MessageData, "message">;
 // "detach" cuts the branch loose on this canvas; "copy" starts a new canvas from it.
@@ -58,6 +60,11 @@ export type BranchMode = "detach" | "copy";
 // Custom colors this workspace saved, newest first.
 type SavedColors = { saved: string[]; onSave: (hex: string) => void };
 const SavedColorsContext = createContext<SavedColors>({ saved: [], onSave: () => {} });
+// The model that would summarize earlier context when branching off, and the
+// size of the context above a bubble, read when the menu asks.
+export type SummaryModel = { label: string; contextWindow?: number; connected: boolean };
+type Summarizer = { model: SummaryModel; estimate: (id: string) => number };
+const SummarizerContext = createContext<Summarizer>({ model: { label: "", connected: false }, estimate: () => 0 });
 // What the minimap marks: roots in order, the selected path and each bubble's role.
 type MapMarks = { roots: Map<string, number>; path: Set<string>; roles: Map<string, Message["role"]> };
 const MapMarksContext = createContext<MapMarks>({ roots: new Map(), path: new Set(), roles: new Map() });
@@ -154,6 +161,9 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
   const [preview, setPreview] = useState<string>();
   const palette = useContext(SavedColorsContext);
   const branchMenu = useMenu();
+  // After choosing where a branch goes: what happens to the context above it.
+  const [branchStep, setBranchStep] = useState<BranchMode>();
+  const summarizer = useContext(SummarizerContext);
   const updateInternals = useUpdateNodeInternals();
   const { message: m } = data;
   const assistant = m.role === "assistant";
@@ -161,6 +171,7 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
   useLayoutEffect(() => { updateInternals(m.id); }, [m.id, mode, updateInternals]);
   useEffect(() => { if (!controls) { setSwatches(false); branchMenu.close(); } }, [controls]);
   useEffect(() => { if (!swatches) setCustom(false); }, [swatches]);
+  useEffect(() => { if (!branchMenu.open) setBranchStep(undefined); }, [branchMenu.open]);
   const color = preview ?? (m.color ? BUBBLE_COLORS[m.color as BubblePreset] ?? m.color : undefined);
   const root = !visualParent(m);
   const website = useMemo(() => (assistant && m.status === "complete" ? extractWebsite(m.content) : undefined), [assistant, m.status, m.content]);
@@ -177,6 +188,7 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
       style={{ ...(size ? { width: size.width, height: size.height } : {}), ...(!size && assistant && mode !== "compact" ? { width: CARD_WIDTH } : {}), ...(color ? { background: color } : {}) }}
       data-tone={color && validHex(color) && isDark(color) ? "dark" : undefined}
       data-root={root || undefined}
+      data-summary={m.summary ? true : undefined}
       className={`bubble ${assistant ? "answer" : "prompt"} ${m.images?.length ? "with-images" : ""} ${selected ? "selected" : ""}`}
     >
       <Anchors
@@ -216,13 +228,35 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
           <button className="bubble-control compact-control" aria-label="Compact bubble" aria-pressed={mode === "compact"} onClick={() => data.onAppearance(m.id, { displayMode: mode === "compact" ? "preview" : "compact" })}><Minimize2 size={15} /></button>
           <button className="bubble-control expand-control" aria-label="Expand bubble" aria-pressed={mode === "expanded"} onClick={() => data.onAppearance(m.id, { displayMode: mode === "expanded" ? "preview" : "expanded" })}><Maximize2 size={15} /></button>
           <button className="bubble-control branch-control" aria-label="Branch off" title="Branch off" aria-haspopup="menu" aria-expanded={branchMenu.open} disabled={m.status !== "complete"} onClick={branchMenu.toggle}><Scissors size={15} /></button>
-          {branchMenu.open && <Popover anchor={branchMenu.anchor} onClose={branchMenu.close} label="Branch off" align="end" className="wide">
+          {branchMenu.open && !branchStep && <Popover anchor={branchMenu.anchor} onClose={branchMenu.close} label="Branch off" align="end" className="wide">
             <MenuItem icon={<Unlink size={15} />} disabled={root}
-              hint={root ? "This bubble already starts its own branch" : "Cut this branch loose on this canvas. Replies send only messages from here down"}
-              onSelect={() => { branchMenu.close(); data.onBranch(m.id, "detach"); }}>Continue here</MenuItem>
-            <MenuItem icon={<FilePlus2 size={15} />} hint="Copy this bubble and everything below it to a new canvas, without earlier context"
-              onSelect={() => { branchMenu.close(); data.onBranch(m.id, "copy"); }}>New chat</MenuItem>
+              hint={root ? "This bubble already starts its own branch" : "Cut this branch loose on this canvas"}
+              onSelect={() => { if (m.parentId) setBranchStep("detach"); else { branchMenu.close(); data.onBranch(m.id, "detach", false); } }}>Continue here</MenuItem>
+            <MenuItem icon={<FilePlus2 size={15} />} hint="Copy this bubble and everything below it to a new canvas"
+              onSelect={() => { if (m.parentId) setBranchStep("copy"); else { branchMenu.close(); data.onBranch(m.id, "copy", false); } }}>New chat</MenuItem>
           </Popover>}
+          {branchMenu.open && branchStep && m.parentId && (() => {
+            const { model } = summarizer;
+            // A new chat's summary covers this bubble too; here, only what is above it.
+            const copy = branchStep === "copy";
+            const tokens = summarizer.estimate(copy ? m.id : m.parentId);
+            const reason = !model.connected ? "Connect a provider and choose a model to write the summary"
+              : branchStep === "detach" && data.generating ? "Wait for the answer on this canvas to finish"
+              : model.contextWindow && tokens > model.contextWindow ? `About ${formatTokens(tokens)} tokens, more than ${model.label} can read. Choose a model with a larger context window`
+              : undefined;
+            const go = (summarize: boolean) => { branchMenu.close(); data.onBranch(m.id, branchStep, summarize); };
+            return <Popover anchor={branchMenu.anchor} onClose={branchMenu.close} label="Earlier context" align="end" className="wide">
+              <p className="menu-heading" aria-hidden="true">Earlier context</p>
+              <MenuItem icon={<ScrollText size={15} />} disabled={!!reason}
+                hint={reason ?? (copy
+                  ? `${model.label} reads about ${formatTokens(tokens)} tokens and writes a summary of this conversation up to here. A new canvas starts from it`
+                  : `${model.label} reads about ${formatTokens(tokens)} tokens and writes a summary that starts this branch. Replies send it instead`)}
+                onSelect={() => go(true)}>Summarize it</MenuItem>
+              <MenuItem icon={<Eraser size={15} />} hint={copy ? "Copy this bubble and everything below it, without earlier context" : "Replies send only messages from here down"}
+                onSelect={() => go(false)}>Leave it out</MenuItem>
+              <MenuItem icon={<ArrowLeft size={15} />} onSelect={() => setBranchStep(undefined)}>Back</MenuItem>
+            </Popover>;
+          })()}
           {swatches && <div className="bubble-swatches" role="group" aria-label="Bubble colors">
             {Object.entries(BUBBLE_COLORS).map(([preset, value]) => <button key={preset} style={{ background: value }} aria-label={`${preset.replace("-", " ")} bubble`} aria-pressed={m.color === preset} onClick={() => { data.onAppearance(m.id, { color: preset as BubblePreset }); setSwatches(false); }} />)}
             <button aria-label="Reset bubble color" onClick={() => { data.onAppearance(m.id, { color: undefined }); setSwatches(false); }}><RotateCcw size={13} /></button>
@@ -236,6 +270,7 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
       </NodeToolbar>
       <div className={`bubble-content ${size ? "nodrag nowheel" : ""}`}>
       {mode === "compact" ? <strong className="bubble-title">{messageTitle(m)}</strong> : <>
+      {m.summary && <span className="summary-label">Summary of earlier context</span>}
       {m.images?.length ? (
         <div className="bubble-images">
           {m.images.slice(0, 4).map((image) => (
@@ -247,7 +282,7 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
       {m.files?.length ? <FileChips files={m.files} limit={3} /> : null}
       {website && <WebsiteThumbnail page={website} />}
       {m.status === "pending" ? (
-        <div className="typing" role="status" aria-label="Writing an answer">
+        <div className="typing" role="status" aria-label={m.summary ? "Writing a summary" : "Writing an answer"}>
           <span />
           <span />
           <span />
@@ -275,13 +310,18 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
               data.onRetry(m.id);
             }}
           >
-            <RotateCcw size={13} /> Retry answer
+            <RotateCcw size={13} /> {m.summary ? "Retry summary" : "Retry answer"}
           </button>
           {m.provider === CHATGPT_PLAN && <button type="button" className="nodrag plan-error-action" disabled={data.generating}
             onClick={event => {
               event.stopPropagation();
               data.onPlanReroute(m.id);
             }}>Change retry route</button>}
+          {m.summary && <button type="button" className="nodrag" disabled={data.generating}
+            onClick={event => {
+              event.stopPropagation();
+              data.onDropSummary(m.id);
+            }}>Continue without summary</button>}
         </div>
       ) : m.content ? (
         mode === "expanded" ? <div className="bubble-full nodrag nowheel"><Markdown content={m.content} /></div> : <MessagePreview content={m.content} prompt={!assistant} />
@@ -324,6 +364,8 @@ type Props = {
   onPlanReroute: (id: string) => void;
   onAppearance: MessageData["onAppearance"];
   onBranch: MessageData["onBranch"];
+  onDropSummary: (id: string) => void;
+  summaryModel: SummaryModel;
   // Selects a bubble and brings it into view, as from the minimap.
   onFocus: (id: string) => void;
   savedColors: string[];
@@ -347,6 +389,8 @@ export function Graph({
   onPlanReroute,
   onAppearance,
   onBranch,
+  onDropSummary,
+  summaryModel,
   onFocus,
   savedColors,
   onSaveColor,
@@ -356,12 +400,19 @@ export function Graph({
   onDrop,
   onViewport,
 }: Props) {
-  const callbacks = useRef({ onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onBranch, onFocus, onSaveColor, onSelect, onDeselect, onDrop, onViewport, onGroupSelection });
-  callbacks.current = { onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onBranch, onFocus, onSaveColor, onSelect, onDeselect, onDrop, onViewport, onGroupSelection };
+  const callbacks = useRef({ onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onBranch, onDropSummary, onFocus, onSaveColor, onSelect, onDeselect, onDrop, onViewport, onGroupSelection });
+  callbacks.current = { onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onBranch, onDropSummary, onFocus, onSaveColor, onSelect, onDeselect, onDrop, onViewport, onGroupSelection };
   // Stable unless the palette changes, so bubbles don't rerender.
   const colorsKey = savedColors.join();
   const swatches = useMemo<SavedColors>(() => ({ saved: savedColors, onSave: hex => callbacks.current.onSaveColor(hex) }), [colorsKey]);
-  const branch = useCallback<MessageData["onBranch"]>((id, mode) => callbacks.current.onBranch(id, mode), []);
+  const branch = useCallback<MessageData["onBranch"]>((...args) => callbacks.current.onBranch(...args), []);
+  const dropSummary = useCallback((id: string) => callbacks.current.onDropSummary(id), []);
+  // Read on demand, so bubbles don't rerender with every canvas change.
+  const latest = useRef(canvas);
+  latest.current = canvas;
+  const estimate = useCallback((id: string) => contextTokens(latest.current, id), []);
+  const summarizer = useMemo<Summarizer>(() => ({ model: summaryModel, estimate }),
+    [summaryModel.label, summaryModel.contextWindow, summaryModel.connected, estimate]);
   const retry = useCallback((id: string) => callbacks.current.onRetry(id), []);
   const planSettings = useCallback<MessageData["onPlanSettings"]>((...args) => callbacks.current.onPlanSettings(...args), []);
   const planReroute = useCallback((id: string) => callbacks.current.onPlanReroute(id), []);
@@ -422,7 +473,7 @@ export function Graph({
   const onPath = useMemo(() => {
     const ids = new Set<string>();
     try {
-      for (const message of ancestorPath(canvas, canvas.selectedId)) {
+      for (const message of ancestorPath(canvas, canvas.selectedId, true)) {
         ids.add(message.id);
         let original = message.editOf;
         while (original && !ids.has(original)) {
@@ -452,7 +503,7 @@ export function Graph({
       width: message.sizes?.[message.displayMode || "preview"]?.width,
       height: message.sizes?.[message.displayMode || "preview"]?.height,
       className: "nokey",
-      data: { message, onResize: resize, onRetry: retry, onPlanSettings: planSettings, onPlanReroute: planReroute, onAppearance: appearance, onBranch: branch, generating, multiple: false },
+      data: { message, onResize: resize, onRetry: retry, onPlanSettings: planSettings, onPlanReroute: planReroute, onAppearance: appearance, onBranch: branch, onDropSummary: dropSummary, generating, multiple: false },
     }));
   const [nodes, setNodes] =
     useNodesState<MessageNodeType>(messageNodes());
@@ -495,13 +546,16 @@ export function Graph({
         height,
         parentId: visualParent(message),
         role: message.role,
-        automatic: !!message.placementOffset,
+        // A summary settles again as its content arrives, as a new answer does.
+        automatic: !!message.placementOffset || !!message.summary,
         upward: !!message.placementOffset && message.placementOffset.y < 0,
         kind: kinds.get(node.id) ?? null,
         offset: message.placementOffset ? (() => {
           const parent = nodes.find(n => n.id === visualParent(message));
           const pw = parent?.measured?.width ?? CARD_WIDTH, ph = parent?.measured?.height ?? 210;
-          return automaticOffset({ width: pw, height: ph }, { width, height }, message.placementOffset, message.role === "assistant");
+          // An answer hangs below its prompt; a branch's top bubble sits beside its summary.
+          const response = message.role === "assistant" && !byId.get(message.parentId ?? "")?.summary;
+          return automaticOffset({ width: pw, height: ph }, { width, height }, message.placementOffset, response);
         })() : message.layoutOffset,
       },
     ];
@@ -563,23 +617,38 @@ export function Graph({
   const centres = new Map(
     nodes.map((n) => [n.id, n.position.x + (n.measured?.width ?? 0) / 2]),
   );
+  const opposite = { right: "left", left: "right", bottom: "top", top: "bottom" } as const;
+  // The sides an edge leaves and enters by, from where the two bubbles sit.
+  const sides = (parentId: string, childId: string) => {
+    const parentNode = nodes.find(n => n.id === parentId);
+    const childNode = nodes.find(n => n.id === childId);
+    const dx = (centres.get(childId) ?? 0) - (centres.get(parentId) ?? 0);
+    const dy = childNode && parentNode ? childNode.position.y + (childNode.measured?.height ?? 0) / 2 - parentNode.position.y - (parentNode.measured?.height ?? 0) / 2 : 1;
+    const side = Math.abs(dx) > Math.abs(dy) ? (dx >= 0 ? "right" : "left") : (dy >= 0 ? "bottom" : "top");
+    return { sourceHandle: `s-${side}`, targetHandle: `t-${opposite[side]}` };
+  };
+  // Where a summary cut a branch loose: dotted, as that context is no longer sent.
+  const cuts: Edge[] = summaryCuts(canvas).map(({ from, to }) => ({
+    id: `${from}-${to}-cut`,
+    source: from,
+    target: to,
+    ...sides(from, to),
+    type: "default",
+    className: "edge-cut",
+    style: { stroke: "var(--edge)", strokeWidth: 2.4, strokeDasharray: "1 7", strokeLinecap: "round" },
+    selectable: false,
+    focusable: false,
+  }));
   const edges: Edge[] = canvas.messages.flatMap((m) => {
     const parentId = visualParent(m);
     if (!parentId) return [];
-    const parentNode = nodes.find(n => n.id === parentId);
-    const childNode = nodes.find(n => n.id === m.id);
-    const dx = (centres.get(m.id) ?? 0) - (centres.get(parentId) ?? 0);
-    const dy = childNode && parentNode ? childNode.position.y + (childNode.measured?.height ?? 0) / 2 - parentNode.position.y - (parentNode.measured?.height ?? 0) / 2 : 1;
-    const side = Math.abs(dx) > Math.abs(dy) ? (dx >= 0 ? "right" : "left") : (dy >= 0 ? "bottom" : "top");
-    const opposite = { right: "left", left: "right", bottom: "top", top: "bottom" };
     const active = onPath.has(m.id) && onPath.has(parentId);
     return [
       {
         id: `${parentId}-${m.id}`,
         source: parentId,
         target: m.id,
-        sourceHandle: `s-${side}`,
-        targetHandle: `t-${opposite[side]}`,
+        ...sides(parentId, m.id),
         type: "default",
         className: active ? "edge-active" : undefined,
         style: {
@@ -673,10 +742,11 @@ export function Graph({
       }}
     >
       <SavedColorsContext.Provider value={swatches}>
+      <SummarizerContext.Provider value={summarizer}>
       <MapMarksContext.Provider value={marks}>
       <ReactFlow
         nodes={controlledNodes}
-        edges={edges}
+        edges={[...cuts, ...edges]}
         nodeTypes={nodeTypes}
         defaultViewport={canvas.viewport}
         nodesConnectable={false}
@@ -732,6 +802,7 @@ export function Graph({
         )}
       </ReactFlow>
       </MapMarksContext.Provider>
+      </SummarizerContext.Provider>
       </SavedColorsContext.Provider>
     </div>
   );

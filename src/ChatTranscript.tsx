@@ -13,7 +13,7 @@ import { WebsiteFrame } from "./WebsiteFrame";
 // bubble, plus the newest answer to a selected prompt while it is written.
 export function chatMessages(canvas: Canvas): Message[] {
   let path: Message[] = [];
-  try { path = ancestorPath(canvas, canvas.selectedId); } catch { return []; }
+  try { path = ancestorPath(canvas, canvas.selectedId, true); } catch { return []; }
   const last = path.at(-1);
   if (last?.role !== "user") return path;
   const answer = canvas.messages
@@ -22,7 +22,7 @@ export function chatMessages(canvas: Canvas): Message[] {
   return answer ? [...path, answer] : path;
 }
 
-function Turn({ message, current, canEdit, generating, onSelect, onEdit, onRetry }: {
+function Turn({ message, current, canEdit, generating, onSelect, onEdit, onRetry, onDropSummary }: {
   message: Message;
   current: boolean;
   canEdit: boolean;
@@ -30,6 +30,7 @@ function Turn({ message, current, canEdit, generating, onSelect, onEdit, onRetry
   onSelect: () => void;
   onEdit: () => void;
   onRetry: () => void;
+  onDropSummary: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const assistant = message.role === "assistant";
@@ -46,17 +47,19 @@ function Turn({ message, current, canEdit, generating, onSelect, onEdit, onRetry
       }}
     >
       <div className="chat-body">
+        {message.summary && <span className="summary-label">Summary of earlier context</span>}
         {message.images?.length ? (
           <div className="chat-images">{message.images.slice(0, 8).map((image) => <Thumbnail key={image.id} image={image} />)}</div>
         ) : null}
         {message.files?.length ? <FileChips files={message.files} /> : null}
         {message.status === "pending" ? (
-          <div className="typing" role="status" aria-label="Writing an answer"><span /><span /><span /></div>
+          <div className="typing" role="status" aria-label={message.summary ? "Writing a summary" : "Writing an answer"}><span /><span /><span /></div>
         ) : message.status === "error" || message.status === "interrupted" ? (
           <div className="chat-error" role="alert">
             <strong>{message.status === "interrupted" ? "Request interrupted" : "A small interruption"}</strong>
             <p>{message.error}</p>
-            <button disabled={generating} onClick={onRetry}><RotateCcw size={13} /> Retry answer</button>
+            <button disabled={generating} onClick={onRetry}><RotateCcw size={13} /> {message.summary ? "Retry summary" : "Retry answer"}</button>
+            {message.summary && <button disabled={generating} onClick={onDropSummary}>Continue without summary</button>}
           </div>
         ) : (
           <>
@@ -79,13 +82,14 @@ function Turn({ message, current, canEdit, generating, onSelect, onEdit, onRetry
   );
 }
 
-export function ChatTranscript({ canvas, canEdit, generating, onSelect, onEdit, onRetry }: {
+export function ChatTranscript({ canvas, canEdit, generating, onSelect, onEdit, onRetry, onDropSummary }: {
   canvas: Canvas;
   canEdit: boolean;
   generating: boolean;
   onSelect: (id: string) => void;
   onEdit: (id: string) => void;
   onRetry: (id: string) => void;
+  onDropSummary: (id: string) => void;
 }) {
   const messages = chatMessages(canvas);
   const scroller = useRef<HTMLDivElement>(null);
@@ -116,6 +120,7 @@ export function ChatTranscript({ canvas, canEdit, generating, onSelect, onEdit, 
             onSelect={() => onSelect(message.id)}
             onEdit={() => onEdit(message.id)}
             onRetry={() => onRetry(message.id)}
+            onDropSummary={() => onDropSummary(message.id)}
           />
         ))}
       </div>

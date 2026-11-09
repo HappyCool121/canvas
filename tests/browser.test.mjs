@@ -2399,6 +2399,7 @@ test("branching off continues on this canvas or starts a new one, and the minima
     // The control may sit under the reading panel at this zoom; dispatch the click to it.
     await page.getByRole("button", { name: "Branch off" }).dispatchEvent("click");
     await page.getByRole("menuitem", { name: /Continue here/ }).click();
+    await page.getByRole("menuitem", { name: /Leave it out/ }).click();
     await page.waitForFunction((id) => !document.querySelector(`.react-flow__edge[data-id$="${id}"], [data-testid="rf__edge-${id}"]`), second.id);
     [canvas] = await savedCanvas(page);
     assert.equal(canvas.messages.find((m) => m.id === second.id).parentId, null);
@@ -2415,6 +2416,7 @@ test("branching off continues on this canvas or starts a new one, and the minima
     await selectMessage(page, rootAnswer.id);
     await page.getByRole("button", { name: "Branch off" }).dispatchEvent("click");
     await page.getByRole("menuitem", { name: /New chat/ }).click();
+    await page.getByRole("menuitem", { name: /Leave it out/ }).click();
     await page.locator('.canvas-open[aria-current="page"]').filter({ hasText: "A little room to explore" }).waitFor();
     assert.equal(await page.locator(".canvas-open").count(), 2);
     await send(page, "Fresh start", 2);
@@ -2423,6 +2425,129 @@ test("branching off continues on this canvas or starts a new one, and the minima
     assert.equal(sent[0].content, "Continue from this earlier answer.");
     const all = await savedCanvas(page);
     assert.equal(all[0].messages.length, 6, "the source canvas keeps its branch");
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("branching off can summarize the earlier context into a new top bubble", { timeout: 90_000 }, async () => {
+  const { context, page, errors } = await open();
+  try {
+    const requests = [];
+    page.on("request", (r) => { if (r.url().endsWith("/api/chat")) requests.push(r.postDataJSON()); });
+    await send(page, "Root question", 1);
+    await send(page, "Second question", 2);
+    let [canvas] = await savedCanvas(page);
+    const second = canvas.messages.find((m) => m.content === "Second question");
+    const rootAnswer = canvas.messages.find((m) => m.role === "assistant" && m.parentId === canvas.rootId);
+    await selectMessage(page, second.id);
+    await page.getByRole("button", { name: "Branch off" }).dispatchEvent("click");
+    await page.getByRole("menuitem", { name: /Continue here/ }).click();
+    const summarize = page.getByRole("menuitem", { name: /Summarize it/ });
+    assert.match(await summarize.textContent(), /reads about \d+ tokens/);
+    await page.getByRole("menuitem", { name: "Back" }).click();
+    await page.getByRole("menuitem", { name: /Continue here/ }).click();
+    await summarize.click();
+    await page.locator('[data-summary="true"][data-status="complete"]').waitFor();
+    await page.screenshot({ path: "output/playwright/branch-summary.png" });
+    [canvas] = await savedCanvas(page);
+    const summary = canvas.messages.find((m) => m.summary);
+    assert.deepEqual(summary.summary, { of: rootAnswer.id });
+    assert.equal(summary.parentId, null);
+    assert.equal(canvas.messages.find((m) => m.id === second.id).parentId, summary.id);
+    const written = requests.at(-1).messages;
+    assert.deepEqual(written.slice(0, 2).map((m) => m.content), ["Root question", rootAnswer.content]);
+    assert.match(written.at(-1).content, /^Summarize our conversation so far\./);
+    await page.locator(`[data-message-id="${summary.id}"]`).getByText("Summary of earlier context").waitFor();
+    // The cut stays visible as a dotted link from the old parent.
+    const cut = page.getByTestId(`rf__edge-${rootAnswer.id}-${second.id}-cut`);
+    await cut.waitFor();
+    assert.notEqual(await cut.locator("path.react-flow__edge-path").evaluate((path) => getComputedStyle(path).strokeDasharray), "none");
+
+    const secondAnswer = canvas.messages.find((m) => m.parentId === second.id);
+    await selectMessage(page, secondAnswer.id);
+    await send(page, "After the summary", 4);
+    assert.deepEqual(requests.at(-1).messages.map((m) => m.content), [
+      "Summarize our earlier conversation.",
+      summary.content,
+      "Second question",
+      secondAnswer.content,
+      "After the summary",
+    ], "only the summary and the branch are sent");
+
+    await selectMessage(page, rootAnswer.id);
+    await page.getByRole("button", { name: "Branch off" }).dispatchEvent("click");
+    await page.getByRole("menuitem", { name: /New chat/ }).click();
+    await page.getByRole("menuitem", { name: /Summarize it/ }).click();
+    await page.waitForFunction(() => document.querySelectorAll(".canvas-open").length === 2);
+    await page.locator('[data-summary="true"][data-status="complete"]').waitFor();
+    const all = await savedCanvas(page);
+    const copy = all.find((c) => c.id !== canvas.id);
+    assert.equal(copy.messages.length, 1, "the new chat holds only the summary");
+    const [copied] = copy.messages;
+    assert.deepEqual(copied.summary, { of: rootAnswer.id, canvasId: canvas.id });
+    assert.equal(copy.rootId, copied.id);
+    assert.deepEqual(requests.at(-1).messages.map((m) => m.content).slice(0, 2), ["Root question", rootAnswer.content], "written from the source canvas, up to the chosen bubble");
+    await send(page, "Carry on from the summary", 2);
+    assert.deepEqual(requests.at(-1).messages.map((m) => m.content), ["Summarize our earlier conversation.", copied.content, "Carry on from the summary"]);
+    assert.equal(all.find((c) => c.id === canvas.id).messages.length, canvas.messages.length + 2, "the source keeps its messages");
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a summary interrupted by a reload can be retried", { timeout: 60_000 }, async () => {
+  const { context, page, errors } = await open();
+  try {
+    await send(page, "Root for a slow-test summary", 1);
+    await send(page, "Next question", 2);
+    let [canvas] = await savedCanvas(page);
+    const next = canvas.messages.find((m) => m.content === "Next question");
+    await selectMessage(page, next.id);
+    await page.getByRole("button", { name: "Branch off" }).dispatchEvent("click");
+    await page.getByRole("menuitem", { name: /Continue here/ }).click();
+    await page.getByRole("menuitem", { name: /Summarize it/ }).click();
+    await page.locator('[data-summary="true"][data-status="pending"]').waitFor();
+    await savedCanvas(page);
+    await page.reload();
+    const interrupted = page.locator('[data-summary="true"][data-status="interrupted"]');
+    await interrupted.waitFor();
+    await interrupted.getByRole("button", { name: "Retry summary" }).click();
+    await page.locator('[data-summary="true"][data-status="complete"]').waitFor();
+    [canvas] = await savedCanvas(page);
+    const summary = canvas.messages.find((m) => m.summary);
+    assert.equal(canvas.messages.find((m) => m.id === next.id).parentId, summary.id);
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a summary that can't be written can be retried or left out", { timeout: 60_000 }, async () => {
+  const { context, page, errors } = await open();
+  try {
+    await send(page, "summary-fail-test root", 1);
+    await send(page, "Next question", 2);
+    let [canvas] = await savedCanvas(page);
+    const next = canvas.messages.find((m) => m.content === "Next question");
+    await selectMessage(page, next.id);
+    await page.getByRole("button", { name: "Branch off" }).dispatchEvent("click");
+    await page.getByRole("menuitem", { name: /Continue here/ }).click();
+    await page.getByRole("menuitem", { name: /Summarize it/ }).click();
+    const failed = page.locator('[data-summary="true"][data-status="error"]');
+    await failed.waitFor();
+    await page.getByRole("textbox", { name: "Your prompt" }).fill("Too soon");
+    await page.getByRole("button", { name: "Send prompt" }).click();
+    await page.getByRole("alert").filter({ hasText: "summary isn’t written yet" }).waitFor();
+    await failed.getByRole("button", { name: "Retry summary" }).click();
+    await failed.waitFor();
+    await failed.getByRole("button", { name: "Continue without summary" }).click();
+    await page.waitForFunction(() => !document.querySelector("[data-summary]"));
+    [canvas] = await savedCanvas(page);
+    assert.equal(canvas.messages.some((m) => m.summary), false);
+    assert.equal(canvas.messages.find((m) => m.id === next.id).parentId, null, "the branch is left loose");
     assert.deepEqual(errors, []);
   } finally {
     await context.close();

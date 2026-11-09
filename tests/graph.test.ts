@@ -25,6 +25,11 @@ import {
   estimateTokens,
   rootIds,
   rootOf,
+  dropSummary,
+  summarizeBranch,
+  SUMMARY_NOTE,
+  SUMMARY_PROMPT,
+  summaryCuts,
 } from "../shared/graph";
 import type { Canvas } from "../shared/types";
 import { canvasUsage } from "../shared/usage";
@@ -425,4 +430,165 @@ test("prompts carry files and the answer's thinking level; a named canvas keeps 
   const done = patchMessage(turn.canvas, turn.answerId, { status: "complete", content: "Read it" });
   const next = addTurn(done, "And then?", turn.answerId);
   assert.deepEqual(requestHistory(next.canvas, next.answerId)[0].files, files);
+});
+
+const route = { provider: "openai", model: "gpt-test", profileId: undefined };
+// Writes a pending summary, as a completed request does.
+const written = (canvas: Canvas, id: string, content = "# Topic\n\nWhat was said") =>
+  patchMessage(canvas, id, { status: "complete", content });
+
+test("branching off with a summary cuts the branch loose under a pending summary of what came before", () => {
+  const root = complete(newCanvas(), "Root question", null);
+  const main = complete(root.canvas, "Main continuation", root.answerId);
+  const deeper = complete(main.canvas, "Deeper", main.answerId);
+  const promptId = deeper.canvas.messages.find((m) => m.content === "Main continuation")!.id;
+  const edited = addTurn(deeper.canvas, "Main, rewritten", null, { editOf: promptId });
+  const withEdit = patchMessage(edited.canvas, edited.answerId, { status: "complete", content: "Edited answer" });
+  const { canvas, summaryId } = summarizeBranch(withEdit, promptId, "detach", route);
+  const summary = canvas.messages.find((m) => m.id === summaryId)!;
+  assert.deepEqual(summary.summary, { of: root.answerId });
+  assert.equal(summary.parentId, null);
+  assert.equal(summary.status, "pending");
+  assert.equal(summary.role, "assistant");
+  assert.equal(summary.model, "gpt-test");
+  assert.equal(canvas.messages.length, withEdit.messages.length + 1);
+  assert.deepEqual(rootIds(canvas), [canvas.rootId, summaryId]);
+  const prompt = canvas.messages.find((m) => m.id === promptId)!;
+  assert.equal(prompt.parentId, summaryId);
+  assert.ok(summary.position.x + CARD_WIDTH < prompt.position.x, "the summary sits beside the branch, on its left");
+  assert.equal(summary.position.y, prompt.position.y);
+  assert.ok(prompt.placementOffset && prompt.layoutOffset);
+  assert.equal(linkKind(canvas, prompt), "side");
+  assert.equal(canvas.selectedId, summaryId, "the summary opens in the reader as it is written");
+  const editPrompt = canvas.messages.find((m) => m.content === "Main, rewritten")!;
+  assert.equal(editPrompt.parentId, summaryId, "an edit of the top bubble continues from the summary too");
+  assert.equal(editPrompt.editOf, promptId);
+  assert.equal(rootOf(canvas, deeper.answerId), summaryId);
+  assert.deepEqual(summaryCuts(canvas), [{ from: root.answerId, to: promptId }], "the cut is drawn from the old parent");
+
+  // The summary is written from the path above the cut; the branch can't continue until then.
+  assert.deepEqual(requestHistory(canvas, summaryId).map((m) => [m.role, m.content]), [
+    ["user", "Root question"],
+    ["assistant", "Answer to Root question"],
+    ["user", SUMMARY_PROMPT],
+  ]);
+  assert.throws(() => addTurn(canvas, "Too soon", deeper.answerId), /already being written/);
+  assert.equal(ancestorPath(canvas, deeper.answerId, true)[0].id, summaryId);
+  assert.throws(() => ancestorPath(canvas, deeper.answerId), /summary isn’t written yet/);
+
+  // Once written, the summary stands in for everything above the cut.
+  const done = written(canvas, summaryId);
+  const next = addTurn(done, "Go on", deeper.answerId);
+  assert.deepEqual(requestHistory(next.canvas, next.answerId).map((m) => [m.role, m.content]), [
+    ["user", SUMMARY_NOTE],
+    ["assistant", "# Topic\n\nWhat was said"],
+    ["user", "Main continuation"],
+    ["assistant", "Answer to Main continuation"],
+    ["user", "Deeper"],
+    ["assistant", "Answer to Deeper"],
+    ["user", "Go on"],
+  ]);
+  const fromSummary = addTurn(done, "From the summary", summaryId);
+  assert.deepEqual(summaryCuts(fromSummary.canvas), [{ from: root.answerId, to: promptId }], "a later reply to the summary is not the cut");
+  assert.deepEqual(summaryCuts(detachBranch(done, promptId)), [], "cutting the bubble loose again removes it");
+  const rewrite = addTurn(done, "Rewritten again", null, { editOf: promptId });
+  assert.deepEqual(requestHistory(rewrite.canvas, rewrite.answerId).map((m) => m.content), [SUMMARY_NOTE, "# Topic\n\nWhat was said", "Rewritten again"]);
+});
+
+test("a summary above an answer is followed by the short user turn, and summaries can be summarized again", () => {
+  const root = complete(newCanvas(), "Root question", null);
+  const next = complete(root.canvas, "Follow-up", root.answerId);
+  const promptId = next.canvas.messages.find((m) => m.content === "Follow-up")!.id;
+  const { canvas, summaryId } = summarizeBranch(next.canvas, next.answerId, "detach", route);
+  assert.equal(canvas.messages.find((m) => m.id === summaryId)!.summary!.of, promptId);
+  assert.deepEqual(requestHistory(canvas, summaryId).map((m) => [m.role, m.content]), [
+    ["user", "Root question"],
+    ["assistant", "Answer to Root question"],
+    ["user", "Follow-up"],
+    ["user", SUMMARY_PROMPT],
+  ], "the summary includes the prompt the cut answer replied to");
+  const done = written(canvas, summaryId, "First summary");
+  const later = complete(done, "Later", next.answerId);
+  assert.deepEqual(requestHistory(later.canvas, later.answerId).map((m) => [m.role, m.content]), [
+    ["user", SUMMARY_NOTE],
+    ["assistant", "First summary"],
+    ["user", CONTINUE_NOTE],
+    ["assistant", "Answer to Follow-up"],
+    ["user", "Later"],
+  ]);
+  const again = summarizeBranch(later.canvas, later.answerId, "detach", route);
+  assert.deepEqual(requestHistory(again.canvas, again.summaryId).map((m) => m.content), [
+    SUMMARY_NOTE, "First summary", CONTINUE_NOTE, "Answer to Follow-up", "Later", SUMMARY_PROMPT,
+  ]);
+});
+
+test("a summary for a new chat is the new canvas's only bubble and covers the conversation up to here", () => {
+  const root = complete(newCanvas(), "Root question", null);
+  const main = complete(root.canvas, "Main continuation", root.answerId);
+  const source = { ...main.canvas, layout: "force-v2" as const };
+  const promptId = source.messages.find((m) => m.content === "Main continuation")!.id;
+  const { canvas: copy, summaryId, topId } = summarizeBranch(source, promptId, "copy", route);
+  assert.notEqual(copy.id, source.id);
+  assert.equal(topId, undefined);
+  assert.equal(copy.messages.length, 1, "no bubbles come over from the previous chat");
+  const [summary] = copy.messages;
+  assert.equal(summary.id, summaryId);
+  assert.equal(copy.rootId, summaryId);
+  assert.equal(copy.selectedId, summaryId);
+  assert.equal(copy.draftParentId, summaryId);
+  assert.deepEqual(summary.summary, { of: promptId, canvasId: source.id });
+  assert.deepEqual(summary.position, { x: 0, y: 0 });
+  assert.equal(copy.title, "Main continuation");
+  assert.equal(copy.layout, "force-v2");
+  assert.deepEqual(requestHistory(copy, summaryId, source).map((m) => m.content), ["Root question", "Answer to Root question", "Main continuation", SUMMARY_PROMPT]);
+  assert.deepEqual(summaryCuts(copy), [], "a new chat has no cut to show");
+  assert.equal(source.messages.length, 4, "the source is untouched");
+  const done = written(copy, summaryId, "Summary");
+  const next = addTurn(done, "Carry on", summaryId);
+  assert.deepEqual(requestHistory(next.canvas, next.answerId).map((m) => m.content), [SUMMARY_NOTE, "Summary", "Carry on"]);
+});
+
+test("summaries need earlier context and a quiet canvas, and an unwritten one can be dropped", () => {
+  const root = complete(newCanvas(), "Root question", null);
+  const main = complete(root.canvas, "Main continuation", root.answerId);
+  assert.throws(() => summarizeBranch(main.canvas, main.canvas.rootId!, "copy", route), /no earlier context/);
+  const busy = addTurn(main.canvas, "Elsewhere", root.answerId).canvas;
+  const promptId = main.canvas.messages.find((m) => m.content === "Main continuation")!.id;
+  assert.throws(() => summarizeBranch(busy, promptId, "detach", route), /already being written/);
+  assert.equal(summarizeBranch(busy, promptId, "copy", route).canvas.messages.length, 1, "a new chat writes on its own canvas");
+
+  const { canvas, summaryId } = summarizeBranch(main.canvas, promptId, "detach", route);
+  assert.equal(dropSummary(canvas, summaryId), canvas, "a summary being written stays");
+  const failed = patchMessage(canvas, summaryId, { status: "error", error: "Nope" });
+  const dropped = dropSummary(failed, summaryId);
+  assert.equal(dropped.messages.some((m) => m.id === summaryId), false);
+  const prompt = dropped.messages.find((m) => m.id === promptId)!;
+  assert.equal(prompt.parentId, null);
+  assert.equal(prompt.placementOffset, undefined);
+  assert.deepEqual(dropped.messages, detachBranch(main.canvas, promptId).messages, "the same as leaving the context out");
+  assert.deepEqual(summaryCuts(dropped), []);
+
+  const copied = summarizeBranch(main.canvas, promptId, "copy", route);
+  const copyDropped = dropSummary(patchMessage(copied.canvas, copied.summaryId, { status: "interrupted" }), copied.summaryId);
+  assert.deepEqual(copyDropped.messages, [], "a new chat without its summary starts blank");
+  assert.equal(copyDropped.rootId, null);
+  assert.equal(copyDropped.selectedId, null);
+});
+
+test("the context meter counts a summary instead of usage reported before it", () => {
+  const root = complete(newCanvas(), "Root question", null);
+  const main = complete(root.canvas, "x".repeat(400), root.answerId);
+  const measured = patchMessage(main.canvas, main.answerId, { usage: { promptTokens: 5000, completionTokens: 100 } });
+  const promptId = measured.messages.find((m) => m.content === "x".repeat(400))!.id;
+  assert.equal(contextTokens(measured, main.answerId), 5100);
+  const { canvas, summaryId } = summarizeBranch(measured, promptId, "detach", route);
+  // Created later than everything already in the branch.
+  const later = patchMessage(canvas, summaryId, { createdAt: Date.now() + 1000 });
+  const done = patchMessage(written(later, summaryId, "y".repeat(40)), summaryId, { usage: { promptTokens: 4000, completionTokens: 300 } });
+  const expected = (10 + 4) + (100 + 4) + (Math.ceil("Answer to ".length / 4 + 100) + 4);
+  assert.equal(contextTokens(done, main.answerId), expected);
+  assert.equal(contextTokens(later, main.answerId), expected - 10, "a summary being written counts as empty");
+  const next = addTurn(done, "More", main.answerId);
+  const answered = patchMessage(next.canvas, next.answerId, { status: "complete", content: "Sure", usage: { promptTokens: 300, completionTokens: 20 }, createdAt: Date.now() + 2000 });
+  assert.equal(contextTokens(answered, next.answerId), 320, "usage reported after the summary counts again");
 });

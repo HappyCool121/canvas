@@ -2082,6 +2082,11 @@ p {
 .thinking-options { min-width: 240px; }
 .bubble-thinking { display: block; margin-top: 4px; font-size: 10.5px; line-height: 1; color: var(--muted); }
 .bubble[data-tone="dark"] .bubble-thinking { color: rgb(246 247 249 / 72%); }
+/* Summaries of earlier context: a branch's top bubble, written by a model. */
+.summary-label { display: block; margin-bottom: 6px; font-size: 10.5px; font-weight: 600; line-height: 1.2; letter-spacing: 0.02em; color: var(--muted); }
+.bubble[data-tone="dark"] .summary-label { color: rgb(246 247 249 / 72%); }
+.bubble[data-summary] .bubble-error button { margin-right: 6px; }
+.menu-heading { padding: 6px 9px 4px; font-size: 11px; font-weight: 600; color: var(--faint); }
 
 /* Code and text files: chips in the composer and bubbles, views in the reader. */
 .file-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }

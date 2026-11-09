@@ -8,6 +8,7 @@ import { createChatGPTPlan } from "../server/chatgpt-plan";
 import { completed, events, planFixture } from "./plan-fixture";
 import type { EnvConnection } from "../server/config";
 import catalog from "../shared/catalog.json" with { type: "json" };
+import { SUMMARY_PROMPT } from "../shared/graph";
 
 const markdown = [
   "# A little room to explore",
@@ -84,7 +85,11 @@ const fetcher: typeof fetch = async (_url, init) => {
   attempts.set(last, count);
   if (last.includes("retry-test") && count === 1)
     return new Response("{}", { status: 429 });
-  const delay = last.includes("slow-test") ? 1800 : 80;
+  const summary = last === SUMMARY_PROMPT;
+  // Summaries of a conversation that mentions summary-fail-test always fail.
+  if (summary && JSON.stringify(body.messages).includes("summary-fail-test"))
+    return new Response("{}", { status: 429 });
+  const delay = last.includes("slow-test") || (summary && JSON.stringify(body.messages).includes("slow-test")) ? 1800 : 80;
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(resolve, delay);
     init?.signal?.addEventListener(
