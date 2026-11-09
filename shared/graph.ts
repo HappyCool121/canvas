@@ -70,7 +70,7 @@ export function ancestorPath(
     if (!message) throw new Error("A message in this conversation is missing.");
     if (message.status !== "complete" && !(unwritten && message.summary))
       throw new Error(message.summary
-        ? "This branch’s summary isn’t written yet. Wait for it, retry it, or choose Continue without summary."
+        ? "This branch’s summary isn’t written yet. Wait for it, retry it, or choose Leave it out."
         : "Choose a completed message to continue.");
     result.unshift(message);
     id = message.parentId;
@@ -352,8 +352,8 @@ export function summaryCuts(canvas: Canvas): { from: string; to: string }[] {
   });
 }
 
-// "Continue without summary": a summary that couldn't be written goes, and its
-// branch is left loose, as if the earlier context had been left out.
+// A summary that couldn't be written goes, and its branch is left loose, as if
+// the earlier context had been left out.
 export function dropSummary(canvas: Canvas, id: string): Canvas {
   const summary = canvas.messages.find((m) => m.id === id);
   if (!summary?.summary || (summary.status !== "error" && summary.status !== "interrupted")) return canvas;
@@ -366,6 +366,23 @@ export function dropSummary(canvas: Canvas, id: string): Canvas {
     rootId: canvas.rootId === id ? rootIds(next)[0] ?? null : canvas.rootId,
     selectedId: canvas.selectedId === id ? null : canvas.selectedId,
     draftParentId: canvas.draftParentId === id ? null : canvas.draftParentId,
+  };
+}
+
+// "Leave it out" after a summary failed: the result of leaving it out up front.
+// On this canvas the branch is cut loose; a new chat gets a copy of the branch
+// from `source`, the canvas it came from, or starts blank if that is gone.
+export function leaveOutSummary(canvas: Canvas, id: string, source?: Canvas): Canvas {
+  const summary = canvas.messages.find((m) => m.id === id);
+  const left = dropSummary(canvas, id);
+  if (left === canvas || !summary?.summary?.canvasId || !source?.messages.some((m) => m.id === summary.summary!.of)) return left;
+  const copy = copyBranch(source, summary.summary.of);
+  return {
+    ...left,
+    rootId: left.rootId ?? copy.rootId,
+    selectedId: copy.rootId,
+    draftParentId: copy.rootId,
+    messages: [...left.messages, ...copy.messages],
   };
 }
 

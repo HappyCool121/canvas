@@ -2543,11 +2543,45 @@ test("a summary that can't be written can be retried or left out", { timeout: 60
     await page.getByRole("alert").filter({ hasText: "summary isn’t written yet" }).waitFor();
     await failed.getByRole("button", { name: "Retry summary" }).click();
     await failed.waitFor();
-    await failed.getByRole("button", { name: "Continue without summary" }).click();
+    await failed.getByRole("button", { name: "Leave it out" }).click();
     await page.waitForFunction(() => !document.querySelector("[data-summary]"));
     [canvas] = await savedCanvas(page);
     assert.equal(canvas.messages.some((m) => m.summary), false);
     assert.equal(canvas.messages.find((m) => m.id === next.id).parentId, null, "the branch is left loose");
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a new chat whose summary can't be written can leave it out and get the branch", { timeout: 60_000 }, async () => {
+  const { context, page, errors } = await open();
+  try {
+    await send(page, "summary-fail-test root", 1);
+    await send(page, "Next question", 2);
+    const [canvas] = await savedCanvas(page);
+    const next = canvas.messages.find((m) => m.content === "Next question");
+    await selectMessage(page, next.id);
+    await page.getByRole("button", { name: "Branch off" }).dispatchEvent("click");
+    await page.getByRole("menuitem", { name: /New chat/ }).click();
+    await page.getByRole("menuitem", { name: /Summarize it/ }).click();
+    await page.waitForFunction(() => document.querySelectorAll(".canvas-open").length === 2);
+    const failed = page.locator('[data-summary="true"][data-status="error"]');
+    await failed.waitFor();
+    await failed.getByRole("button", { name: "Retry summary" }).click();
+    await failed.waitFor();
+    await failed.getByRole("button", { name: "Leave it out" }).click();
+    await page.waitForFunction(() => !document.querySelector("[data-summary]") && document.querySelectorAll(".react-flow__node").length === 2);
+    const copy = (await savedCanvas(page)).find((c) => c.id !== canvas.id);
+    assert.equal(copy.messages.some((m) => m.summary), false);
+    const answer = canvas.messages.find((m) => m.parentId === next.id);
+    assert.deepEqual(copy.messages.map((m) => m.content), [next.content, answer.content], "the branch is copied, as Leave it out up front does");
+    const top = copy.messages.find((m) => m.content === "Next question");
+    assert.equal(top.parentId, null);
+    assert.equal(copy.rootId, top.id);
+    assert.equal(copy.selectedId, top.id);
+    await page.waitForTimeout(800);
+    await page.screenshot({ path: "output/playwright/summary-left-out-new-chat.png" });
     assert.deepEqual(errors, []);
   } finally {
     await context.close();

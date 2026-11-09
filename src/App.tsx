@@ -290,7 +290,7 @@ export default function App() {
                   onBranch={(id, mode, summarize) => void workspace.branchOff(canvas.id, id, mode, summarize && modelConnected(model) ? model : undefined, geometry.current).then((branched) => {
                     if (branched) setCamera({ ids: branched.focus });
                   })}
-                  onDropSummary={(id) => workspace.continueWithoutSummary(canvas.id, id)}
+                  onLeaveOutSummary={(id) => void workspace.leaveOutSummary(canvas.id, id).then((left) => left && setCamera({ ids: left.focus }))}
                   summaryModel={{ label: model.label, contextWindow: model.contextWindow, connected: modelConnected(model) }}
                   onFocus={(id) => { select(id); setCamera({ ids: [id] }); }}
                   savedColors={workspace.savedColors}
@@ -450,7 +450,7 @@ export default function App() {
                       onSelect={select}
                       onEdit={(id) => workspace.startEdit(canvas.id, id)}
                       onRetry={(id) => void workspace.retry(canvas.id, id)}
-                      onDropSummary={(id) => workspace.continueWithoutSummary(canvas.id, id)}
+                      onLeaveOutSummary={(id) => void workspace.leaveOutSummary(canvas.id, id).then((left) => left && setCamera({ ids: left.focus }))}
                     />
                   </>
                 ) : reading && (

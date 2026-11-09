@@ -22,7 +22,7 @@ export function chatMessages(canvas: Canvas): Message[] {
   return answer ? [...path, answer] : path;
 }
 
-function Turn({ message, current, canEdit, generating, onSelect, onEdit, onRetry, onDropSummary }: {
+function Turn({ message, current, canEdit, generating, onSelect, onEdit, onRetry, onLeaveOutSummary }: {
   message: Message;
   current: boolean;
   canEdit: boolean;
@@ -30,7 +30,7 @@ function Turn({ message, current, canEdit, generating, onSelect, onEdit, onRetry
   onSelect: () => void;
   onEdit: () => void;
   onRetry: () => void;
-  onDropSummary: () => void;
+  onLeaveOutSummary: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   const assistant = message.role === "assistant";
@@ -59,7 +59,7 @@ function Turn({ message, current, canEdit, generating, onSelect, onEdit, onRetry
             <strong>{message.status === "interrupted" ? "Request interrupted" : "A small interruption"}</strong>
             <p>{message.error}</p>
             <button disabled={generating} onClick={onRetry}><RotateCcw size={13} /> {message.summary ? "Retry summary" : "Retry answer"}</button>
-            {message.summary && <button disabled={generating} onClick={onDropSummary}>Continue without summary</button>}
+            {message.summary && <button disabled={generating} onClick={onLeaveOutSummary}>Leave it out</button>}
           </div>
         ) : (
           <>
@@ -82,14 +82,14 @@ function Turn({ message, current, canEdit, generating, onSelect, onEdit, onRetry
   );
 }
 
-export function ChatTranscript({ canvas, canEdit, generating, onSelect, onEdit, onRetry, onDropSummary }: {
+export function ChatTranscript({ canvas, canEdit, generating, onSelect, onEdit, onRetry, onLeaveOutSummary }: {
   canvas: Canvas;
   canEdit: boolean;
   generating: boolean;
   onSelect: (id: string) => void;
   onEdit: (id: string) => void;
   onRetry: (id: string) => void;
-  onDropSummary: (id: string) => void;
+  onLeaveOutSummary: (id: string) => void;
 }) {
   const messages = chatMessages(canvas);
   const scroller = useRef<HTMLDivElement>(null);
@@ -120,7 +120,7 @@ export function ChatTranscript({ canvas, canEdit, generating, onSelect, onEdit, 
             onSelect={() => onSelect(message.id)}
             onEdit={() => onEdit(message.id)}
             onRetry={() => onRetry(message.id)}
-            onDropSummary={() => onDropSummary(message.id)}
+            onLeaveOutSummary={() => onLeaveOutSummary(message.id)}
           />
         ))}
       </div>

@@ -12,7 +12,7 @@ import {
   ancestorPath,
   copyBranch,
   detachBranch,
-  dropSummary,
+  leaveOutSummary as withoutSummary,
   summarizeBranch,
   type PlacementRect,
 } from "../shared/graph";
@@ -213,7 +213,7 @@ export function useWorkspace(models: ModelInfo[]) {
       // A summary from "New chat" summarizes messages on the canvas it was copied from.
       const sourceId = answer?.summary?.canvasId;
       const source = sourceId ? data.current.find((c) => c.id === sourceId) : canvas;
-      if (!source) throw new Error("The canvas this summary came from was deleted. Choose Continue without summary.");
+      if (!source) throw new Error("The canvas this summary came from was deleted. Choose Leave it out.");
       const history = requestHistory(canvas, answerId, source);
       // Files travel as text inside their prompt, so every model can read them.
       const readFile = async (file: TextFileRef) => {
@@ -775,10 +775,23 @@ export function useWorkspace(models: ModelInfo[]) {
       setNotice((error as Error).message);
     }
   }
-  // Removes a summary that couldn't be written, leaving its branch loose.
-  function continueWithoutSummary(canvasId: string, summaryId: string) {
-    if (busy.current.has(canvasId)) return;
-    void update(canvasId, (c) => dropSummary(c, summaryId));
+  // Removes a summary that couldn't be written, as if the earlier context had
+  // been left out up front. Returns the copied branch to bring into view.
+  async function leaveOutSummary(canvasId: string, summaryId: string): Promise<{ focus: string[] } | undefined> {
+    const current = data.current.find((c) => c.id === canvasId);
+    const summary = current?.messages.find((m) => m.id === summaryId)?.summary;
+    // A summary still being written stays; withoutSummary leaves it alone.
+    if (!current || !summary) return;
+    setNotice("");
+    try {
+      const source = summary.canvasId ? data.current.find((c) => c.id === summary.canvasId) : undefined;
+      const next = withoutSummary(current, summaryId, source);
+      if (next === current) return;
+      await commit(next);
+      return summary.canvasId && next.messages.length ? { focus: next.messages.map((m) => m.id) } : undefined;
+    } catch (error) {
+      setNotice((error as Error).message);
+    }
   }
 
   return {
@@ -794,7 +807,7 @@ export function useWorkspace(models: ModelInfo[]) {
     saveColor,
     importFile,
     branchOff,
-    continueWithoutSummary,
+    leaveOutSummary,
     preferences,
     setPreference,
     canvases,

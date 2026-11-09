@@ -51,7 +51,7 @@ type MessageData = {
   onResize: (id: string, rect: Rectangle, phase: ResizePhase) => void;
   onAppearance: (id: string, patch: Pick<Message, "color" | "displayMode">) => void;
   onBranch: (id: string, mode: BranchMode, summarize: boolean) => void;
-  onDropSummary: (id: string) => void;
+  onLeaveOutSummary: (id: string) => void;
 };
 type MessageNodeType = Node<MessageData, "message">;
 // "detach" cuts the branch loose on this canvas; "copy" starts a new canvas from it.
@@ -320,8 +320,8 @@ const MessageNode = memo(function MessageNode({ data, selected }: NodeProps<Mess
           {m.summary && <button type="button" className="nodrag" disabled={data.generating}
             onClick={event => {
               event.stopPropagation();
-              data.onDropSummary(m.id);
-            }}>Continue without summary</button>}
+              data.onLeaveOutSummary(m.id);
+            }}>Leave it out</button>}
         </div>
       ) : m.content ? (
         mode === "expanded" ? <div className="bubble-full nodrag nowheel"><Markdown content={m.content} /></div> : <MessagePreview content={m.content} prompt={!assistant} />
@@ -364,7 +364,7 @@ type Props = {
   onPlanReroute: (id: string) => void;
   onAppearance: MessageData["onAppearance"];
   onBranch: MessageData["onBranch"];
-  onDropSummary: (id: string) => void;
+  onLeaveOutSummary: (id: string) => void;
   summaryModel: SummaryModel;
   // Selects a bubble and brings it into view, as from the minimap.
   onFocus: (id: string) => void;
@@ -389,7 +389,7 @@ export function Graph({
   onPlanReroute,
   onAppearance,
   onBranch,
-  onDropSummary,
+  onLeaveOutSummary,
   summaryModel,
   onFocus,
   savedColors,
@@ -400,13 +400,13 @@ export function Graph({
   onDrop,
   onViewport,
 }: Props) {
-  const callbacks = useRef({ onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onBranch, onDropSummary, onFocus, onSaveColor, onSelect, onDeselect, onDrop, onViewport, onGroupSelection });
-  callbacks.current = { onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onBranch, onDropSummary, onFocus, onSaveColor, onSelect, onDeselect, onDrop, onViewport, onGroupSelection };
+  const callbacks = useRef({ onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onBranch, onLeaveOutSummary, onFocus, onSaveColor, onSelect, onDeselect, onDrop, onViewport, onGroupSelection });
+  callbacks.current = { onResize, onRetry, onPlanSettings, onPlanReroute, onAppearance, onBranch, onLeaveOutSummary, onFocus, onSaveColor, onSelect, onDeselect, onDrop, onViewport, onGroupSelection };
   // Stable unless the palette changes, so bubbles don't rerender.
   const colorsKey = savedColors.join();
   const swatches = useMemo<SavedColors>(() => ({ saved: savedColors, onSave: hex => callbacks.current.onSaveColor(hex) }), [colorsKey]);
   const branch = useCallback<MessageData["onBranch"]>((...args) => callbacks.current.onBranch(...args), []);
-  const dropSummary = useCallback((id: string) => callbacks.current.onDropSummary(id), []);
+  const leaveOutSummary = useCallback((id: string) => callbacks.current.onLeaveOutSummary(id), []);
   // Read on demand, so bubbles don't rerender with every canvas change.
   const latest = useRef(canvas);
   latest.current = canvas;
@@ -503,7 +503,7 @@ export function Graph({
       width: message.sizes?.[message.displayMode || "preview"]?.width,
       height: message.sizes?.[message.displayMode || "preview"]?.height,
       className: "nokey",
-      data: { message, onResize: resize, onRetry: retry, onPlanSettings: planSettings, onPlanReroute: planReroute, onAppearance: appearance, onBranch: branch, onDropSummary: dropSummary, generating, multiple: false },
+      data: { message, onResize: resize, onRetry: retry, onPlanSettings: planSettings, onPlanReroute: planReroute, onAppearance: appearance, onBranch: branch, onLeaveOutSummary: leaveOutSummary, generating, multiple: false },
     }));
   const [nodes, setNodes] =
     useNodesState<MessageNodeType>(messageNodes());

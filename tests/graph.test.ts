@@ -26,6 +26,7 @@ import {
   rootIds,
   rootOf,
   dropSummary,
+  leaveOutSummary,
   summarizeBranch,
   SUMMARY_NOTE,
   SUMMARY_PROMPT,
@@ -548,7 +549,7 @@ test("a summary for a new chat is the new canvas's only bubble and covers the co
   assert.deepEqual(requestHistory(next.canvas, next.answerId).map((m) => m.content), [SUMMARY_NOTE, "Summary", "Carry on"]);
 });
 
-test("summaries need earlier context and a quiet canvas, and an unwritten one can be dropped", () => {
+test("summaries need earlier context and a quiet canvas, and an unwritten one can be left out", () => {
   const root = complete(newCanvas(), "Root question", null);
   const main = complete(root.canvas, "Main continuation", root.answerId);
   assert.throws(() => summarizeBranch(main.canvas, main.canvas.rootId!, "copy", route), /no earlier context/);
@@ -567,12 +568,37 @@ test("summaries need earlier context and a quiet canvas, and an unwritten one ca
   assert.equal(prompt.placementOffset, undefined);
   assert.deepEqual(dropped.messages, detachBranch(main.canvas, promptId).messages, "the same as leaving the context out");
   assert.deepEqual(summaryCuts(dropped), []);
+  assert.equal(leaveOutSummary(canvas, summaryId, main.canvas), canvas, "Leave it out waits for a summary being written");
+  assert.deepEqual(leaveOutSummary(failed, summaryId).messages, dropped.messages, "Continue here: the branch is left loose");
 
   const copied = summarizeBranch(main.canvas, promptId, "copy", route);
-  const copyDropped = dropSummary(patchMessage(copied.canvas, copied.summaryId, { status: "interrupted" }), copied.summaryId);
+  const interrupted = patchMessage(copied.canvas, copied.summaryId, { status: "interrupted" });
+  const copyDropped = dropSummary(interrupted, copied.summaryId);
   assert.deepEqual(copyDropped.messages, [], "a new chat without its summary starts blank");
   assert.equal(copyDropped.rootId, null);
   assert.equal(copyDropped.selectedId, null);
+
+  // New chat: leaving the summary out copies the branch, as choosing it up front does.
+  const left = leaveOutSummary(interrupted, copied.summaryId, main.canvas);
+  const shape = (c: Canvas) => c.messages.map((m) => ({
+    role: m.role, content: m.content, position: m.position, parent: c.messages.findIndex((p) => p.id === m.parentId),
+  }));
+  assert.equal(left.id, copied.canvas.id, "the new chat keeps its canvas");
+  assert.equal(left.messages.some((m) => m.summary), false);
+  assert.deepEqual(shape(left), shape(copyBranch(main.canvas, promptId)));
+  assert.equal(left.messages.some((m) => main.canvas.messages.some((s) => s.id === m.id)), false, "the copy has its own ids");
+  const top = left.messages.find((m) => m.content === "Main continuation")!;
+  assert.equal(top.parentId, null);
+  assert.deepEqual([left.rootId, left.selectedId, left.draftParentId], [top.id, top.id, top.id]);
+  const reply = addTurn(left, "Next", left.messages.find((m) => m.role === "assistant")!.id);
+  assert.deepEqual(requestHistory(reply.canvas, reply.answerId).map((m) => m.content),
+    ["Main continuation", "Answer to Main continuation", "Next"], "earlier context stays out");
+  assert.deepEqual(leaveOutSummary(interrupted, copied.summaryId).messages, [], "with its source deleted, a new chat starts blank");
+  const branch = branchIds(main.canvas, promptId);
+  const pruned = { ...main.canvas, messages: main.canvas.messages.filter((m) => !branch.has(m.id)) };
+  assert.deepEqual(leaveOutSummary(interrupted, copied.summaryId, pruned).messages, [], "so it does with the bubble gone");
+  const answering = addTurn(main.canvas, "Still going", main.answerId).canvas;
+  assert.throws(() => leaveOutSummary(interrupted, copied.summaryId, answering), /Wait for the answer/);
 });
 
 test("the context meter counts a summary instead of usage reported before it", () => {
